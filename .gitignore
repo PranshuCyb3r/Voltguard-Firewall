@@ -1,0 +1,9 @@
+# Compiled binaries
+*.exe
+*.o
+*.obj
+
+# Virtual environments
+.venv/
+venv/
+__pycache__/
