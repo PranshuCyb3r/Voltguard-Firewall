@@ -69,5 +69,3 @@ namespace VoltGuard {
     };
 
 } // namespace VoltGuard
-
-
