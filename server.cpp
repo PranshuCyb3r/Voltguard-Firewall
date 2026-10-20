@@ -1,45 +1,50 @@
 #include <iostream>
 #include <vector>
 #include <chrono>
+#include <cstring>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
 #include "modbus_frame.hpp"
 #include "physics_engine.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
 
-#define PORT 5502
-#define BUFFER_SIZE 1024
+#define LISTEN_PORT 5502
+#define RECV_BUFFER_SIZE 1024
 
 int main() {
     std::cout << "========================================================================\n";
-    std::cout << "     VoltGuard: Real-Time Cyber-Physical OT/ICS Firewall Server         \n";
+    std::cout << "     VoltGuard: Real-Time Cyber-Physical OT/ICS Firewall Daemon         \n";
     std::cout << "========================================================================\n";
 
-    // 1. Initialize Winsock for Windows networking
+    // 1. Initialize Winsock
     WSADATA wsaData;
-    int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (wsaResult != 0) {
-        std::cerr << "[ERROR] WSAStartup failed: " << wsaResult << "\n";
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "[CRITICAL] Winsock initialization failed.\n";
         return 1;
     }
 
-    // 2. Create TCP Socket
+    // 2. Open TCP Stream Socket
     SOCKET server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (server_socket == INVALID_SOCKET) {
-        std::cerr << "[ERROR] Failed to create socket: " << WSAGetLastError() << "\n";
+        std::cerr << "[CRITICAL] Failed to create socket: " << WSAGetLastError() << "\n";
         WSACleanup();
         return 1;
     }
 
+    // Allow quick port re-use
+    BOOL optval = TRUE;
+    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&optval, sizeof(optval));
+
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY; // Listen on all network interfaces
-    server_addr.sin_port = htons(PORT);
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(LISTEN_PORT);
 
-    // 3. Bind socket to port 5502
+    // 3. Bind to interface
     if (bind(server_socket, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "[ERROR] Bind failed on port " << PORT << ": " << WSAGetLastError() << "\n";
+        std::cerr << "[CRITICAL] Port " << LISTEN_PORT << " bind failed: " << WSAGetLastError() << "\n";
         closesocket(server_socket);
         WSACleanup();
         return 1;
@@ -47,20 +52,20 @@ int main() {
 
     // 4. Start Listening
     if (listen(server_socket, SOMAXCONN) == SOCKET_ERROR) {
-        std::cerr << "[ERROR] Listen failed: " << WSAGetLastError() << "\n";
+        std::cerr << "[CRITICAL] Listen error: " << WSAGetLastError() << "\n";
         closesocket(server_socket);
         WSACleanup();
         return 1;
     }
 
-    std::cout << "[VoltGuard] Engine State  : ACTIVE\n";
-    std::cout << "[VoltGuard] Listening on  : 0.0.0.0:" << PORT << " (Modbus/TCP)\n";
-    std::cout << "[VoltGuard] Physics Rules : Active (Max RPM 3600 | Max Accel 400 RPM/s | Min 500 RPM)\n";
-    std::cout << "[VoltGuard] Waiting for SCADA / PLC connections...\n";
+    std::cout << "[SYSTEM] Engine Status   : ACTIVE & ENFORCING\n";
+    std::cout << "[SYSTEM] Listening on    : 0.0.0.0:" << LISTEN_PORT << " (Modbus TCP)\n";
+    std::cout << "[SYSTEM] Invariant Rules : Max 3600 RPM | Min 500 RPM | Accel 400 RPM/s\n";
+    std::cout << "[SYSTEM] Press Ctrl+C in terminal to safely stop.\n";
     std::cout << "------------------------------------------------------------------------\n\n";
 
     VoltGuard::PhysicsEngine engine;
-    uint8_t buffer[BUFFER_SIZE];
+    uint8_t buffer[RECV_BUFFER_SIZE];
 
     while (true) {
         sockaddr_in client_addr{};
@@ -68,16 +73,16 @@ int main() {
 
         SOCKET client_socket = accept(server_socket, (sockaddr*)&client_addr, &client_size);
         if (client_socket == INVALID_SOCKET) {
-            std::cerr << "[WARN] Client connection accept failed: " << WSAGetLastError() << "\n";
             continue;
         }
 
         char client_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-        std::cout << "[INCOMING] Connection established from SCADA Client: " << client_ip << "\n";
+        std::cout << "[CONN] Inbound connection from: " << client_ip << "\n";
 
-        // Receive raw Modbus frame over the wire
-        int bytes_received = recv(client_socket, (char*)buffer, BUFFER_SIZE, 0);
+        std::memset(buffer, 0, RECV_BUFFER_SIZE);
+        int bytes_received = recv(client_socket, (char*)buffer, RECV_BUFFER_SIZE, 0);
+
         if (bytes_received > 0) {
             auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
@@ -85,30 +90,32 @@ int main() {
             VoltGuard::ParsedFrame frame;
             auto start = std::chrono::high_resolution_clock::now();
 
-            bool parse_success = VoltGuard::ModbusParser::parse_frame(buffer, bytes_received, &frame);
+            bool parse_ok = VoltGuard::ModbusParser::parse_frame(buffer, bytes_received, &frame);
 
-            if (!parse_success) {
-                std::cout << "  [MALFORMED] Invalid Modbus packet size/format. Dropping connection.\n";
+            if (!parse_ok) {
+                std::cout << "  [ANOMALY] Malformed frame or invalid protocol header. Packet dropped.\n";
+                const char* malformed_resp = "STATUS: ERROR_MALFORMED_FRAME\n";
+                send(client_socket, malformed_resp, (int)strlen(malformed_resp), 0);
             } else {
                 VoltGuard::Verdict verdict = engine.verify_rpm_command(frame.register_value, now_ms);
                 auto end = std::chrono::high_resolution_clock::now();
                 auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 
-                std::cout << "  [MODBUS] Transaction ID : " << frame.transaction_id << "\n";
-                std::cout << "  [MODBUS] Unit ID (PLC)  : " << (int)frame.unit_id << "\n";
-                std::cout << "  [MODBUS] Function Code  : 0x0" << std::hex << (int)frame.function_code << std::dec << "\n";
-                std::cout << "  [MODBUS] Requested RPM  : " << frame.register_value << " RPM\n";
-                std::cout << "  [VERDICT] Decision      : " << VoltGuard::PhysicsEngine::verdict_to_string(verdict) << "\n";
-                std::cout << "  [LATENCY] Engine Time   : " << ns << " ns (" << (ns / 1000.0) << " us)\n";
+                std::cout << "  [FRAME] TxID: " << frame.transaction_id
+                          << " | Unit: " << (int)frame.unit_id 
+                          << " | Func: 0x0" << std::hex << (int)frame.function_code << std::dec
+                          << " | Target RPM: " << frame.register_value << " RPM\n";
+                std::cout << "  [VERDICT] " << VoltGuard::PhysicsEngine::verdict_to_string(verdict) << "\n";
+                std::cout << "  [INSPECTION TIME] " << ns << " ns (" << (ns / 1000.0) << " us)\n";
 
                 if (verdict == VoltGuard::Verdict::ALLOW) {
-                    std::cout << "  >>> ACTION: [FORWARDED TO ACTUATOR / PLC] <<<\n";
+                    std::cout << "  >>> FORWARDED: Safe command routed to physical actuator <<<\n";
                     const char* resp = "STATUS: ALLOWED\n";
-                    send(client_socket, resp, strlen(resp), 0);
+                    send(client_socket, resp, (int)strlen(resp), 0);
                 } else {
-                    std::cout << "  >>> ACTION: [CYBER ATTACK BLOCKED - PACKET DROPPED] <<<\n";
+                    std::cout << "  >>> BLOCKED: Cyber-physical attack prevented. Connection reset <<<\n";
                     const char* resp = "STATUS: BLOCKED_BY_VOLTGUARD_PHYSICS_ENGINE\n";
-                    send(client_socket, resp, strlen(resp), 0);
+                    send(client_socket, resp, (int)strlen(resp), 0);
                 }
             }
         }
