@@ -1,63 +1,31 @@
 #pragma once
-
 #include <cstdint>
-#include <cstddef>
-#include <winsock2.h>
-
-namespace VoltGuard {
 
 #pragma pack(push, 1)
-struct ModbusTCPHeader {
-    uint16_t transaction_id;
-    uint16_t protocol_id;
-    uint16_t length;
-    uint8_t  unit_id;
+
+// Standard Modbus TCP MBAP Header (7 Bytes) + PDU
+struct ModbusTcpHeader {
+    uint16_t transaction_id;   // 2 bytes
+    uint16_t protocol_id;      // 2 bytes
+    uint16_t length;           // 2 bytes
+    uint8_t  unit_id;          // 1 byte
+    uint8_t  function_code;    // 1 byte
+    uint16_t register_address; // 2 bytes
+    uint16_t register_value;   // 2 bytes
 };
+
+// Exactly 32-Byte Aligned Cache-Line Telemetry Ingestion Struct
+// Calculation: 8 (ts) + 2 (tx) + 2 (reg) + 4 (rpm) + 4 (shock) + 1 (verdict) + 11 (pad) = 32 Bytes
+struct TelemetryFrame {
+    uint64_t timestamp_ns;     // 8 bytes (monotonic clock)
+    uint16_t transaction_id;   // 2 bytes
+    uint16_t target_register;  // 2 bytes
+    float    injected_rpm;     // 4 bytes
+    float    joukowsky_bar;    // 4 bytes
+    uint8_t  verdict;          // 1 byte (0x01: ALLOW, 0x00: DROP)
+    uint8_t  reserved[11];     // 11 bytes strict cache-line padding
+};
+
 #pragma pack(pop)
 
-struct ParsedFrame {
-    uint16_t transaction_id;
-    uint16_t protocol_id;
-    uint16_t length;
-    uint8_t  unit_id;
-    uint8_t  function_code;
-    uint16_t register_address;
-    uint16_t register_value;
-};
-
-class ModbusParser {
-public:
-    // Zero-copy parsing: analyzes raw bytes directly without buffer copies
-    static bool parse_frame(const uint8_t* raw_bytes, size_t size, ParsedFrame* out_frame) {
-        // Minimum Modbus TCP write frame size: 7 bytes (MBAP) + 5 bytes (PDU) = 12 bytes
-        if (size < 12 || out_frame == nullptr || raw_bytes == nullptr) {
-            return false;
-        }
-
-        const auto* header = reinterpret_cast<const ModbusTCPHeader*>(raw_bytes);
-
-        // Convert big-endian network bytes to host architecture
-        out_frame->transaction_id = ntohs(header->transaction_id);
-        out_frame->protocol_id    = ntohs(header->protocol_id);
-        out_frame->length         = ntohs(header->length);
-        out_frame->unit_id        = header->unit_id;
-
-        // Protocol ID must always be 0x0000 for standard Modbus TCP
-        if (out_frame->protocol_id != 0x0000) {
-            return false;
-        }
-
-        // Extract PDU (Function Code, Target Register, Payload Value)
-        out_frame->function_code = raw_bytes[7];
-
-        uint16_t raw_reg_addr = *reinterpret_cast<const uint16_t*>(&raw_bytes[8]);
-        out_frame->register_address = ntohs(raw_reg_addr);
-
-        uint16_t raw_reg_val = *reinterpret_cast<const uint16_t*>(&raw_bytes[10]);
-        out_frame->register_value = ntohs(raw_reg_val);
-
-        return true;
-    }
-};
-
-} // namespace VoltGuard
+static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be strictly 32 bytes");

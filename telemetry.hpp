@@ -1,15 +1,29 @@
 #pragma once
-#include <cstdint>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include "modbus_frame.hpp"
 
-#pragma pack(push, 1)
-// 32-Byte Packed Telemetry Struct (Zero-Allocation IPC Stream)
-struct TelemetryFrame {
-    uint64_t timestamp_ns;   // Ingestion time in nanoseconds
-    uint16_t transaction_id; // Modbus Transaction ID
-    uint16_t target_register;// Injected register (e.g. 40301)
-    float    injected_rpm;   // Commanded RPM value
-    float    joukowsky_bar;  // Calculated shockwave pressure (Bar)
-    uint8_t  verdict;        // 0x01: ALLOW, 0x00: DROP
-    uint8_t  reserved[7];    // 32-byte cache-line padding
+class TelemetryPublisher {
+private:
+    SOCKET udp_socket;
+    sockaddr_in dest_addr;
+
+public:
+    TelemetryPublisher(const char* ip, int port) {
+        udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        dest_addr.sin_family = AF_INET;
+        dest_addr.sin_port = htons(port);
+        dest_addr.sin_addr.s_addr = inet_addr(ip);
+    }
+
+    ~TelemetryPublisher() {
+        if (udp_socket != INVALID_SOCKET) {
+            closesocket(udp_socket);
+        }
+    }
+
+    void publish(const TelemetryFrame& frame) {
+        sendto(udp_socket, reinterpret_cast<const char*>(&frame), sizeof(TelemetryFrame), 0,
+               (sockaddr*)&dest_addr, sizeof(dest_addr));
+    }
 };
-#pragma pack(pop)

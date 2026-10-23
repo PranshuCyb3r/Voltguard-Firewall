@@ -1,64 +1,54 @@
 import numpy as np
+from scipy.integrate import odeint
 
-class PipelinePhysics:
-    def __init__(self):
-        self.RHO = 998.2          # Fluid density of water (kg/m^3)
-        self.C_WAVE = 1200.0      # Acoustic wave propagation speed (m/s)
-        self.IMPELLER_RADIUS = 0.18 # 180mm impeller
-        
-        # Operational Limits
-        self.NOMINAL_PRESSURE_BAR = 4.5    # Normal running baseline (4.5 Bar)
-        self.BURST_PRESSURE_BAR = 16.0     # Pipe catastrophic burst threshold (16 Bar)
-        self.MAX_SAFE_RPM = 3600           # Mechanical yield limit
-        self.MIN_SAFE_RPM = 500            # Cavitation lower bound
+# Physical Constants for Schedule-40 Steel Industrial Pipeline
+RHO = 998.0          # Water density (kg/m^3)
+SPEED_OF_SOUND = 1480 # Acoustic wave speed in water inside pipe (m/s)
+IMPELLER_RADIUS = 0.15 # Impeller radius (m)
+PIPE_BURST_BAR = 16.0 # Max allowable operating pressure before mechanical burst
+MAX_SAFE_RPM = 3600.0 # Rotor shear threshold
 
-    def rpm_to_velocity(self, rpm: float) -> float:
-        """Converts centrifugal pump RPM to fluid discharge velocity (m/s)."""
-        omega = (2.0 * np.pi * rpm) / 60.0
-        tangential_speed = omega * self.IMPELLER_RADIUS
-        return tangential_speed * 0.35  # Slip factor
+def calculate_joukowsky_shock(delta_rpm: float) -> float:
+    """Calculates transient water hammer pressure shock in Bar."""
+    # Convert RPM delta to linear tip velocity delta (v = omega * r)
+    delta_v = (abs(delta_rpm) * 2.0 * np.pi * IMPELLER_RADIUS) / 60.0
+    # Joukowsky Equation: Delta P = rho * a * delta_v (Pa -> Bar)
+    delta_p_pa = RHO * SPEED_OF_SOUND * delta_v
+    return delta_p_pa / 1e5
 
-    def evaluate_setpoint(self, current_rpm: float, target_rpm: float):
-        """Calculates transient surge via Joukowsky Equation: Delta_P = rho * c * Delta_v"""
-        v_current = self.rpm_to_velocity(current_rpm)
-        v_target = self.rpm_to_velocity(target_rpm)
-        delta_v = v_target - v_current
+def pump_transient_ode(y, t, target_rpm):
+    """Simple 1st order motor inertia response: d(rpm)/dt = (target - current) / tau"""
+    current_rpm = y[0]
+    tau = 0.25 # Motor electrical-mechanical time constant (seconds)
+    drpm_dt = (target_rpm - current_rpm) / tau
+    return [drpm_dt]
 
-        # Dynamic head pressure
-        dynamic_head_bar = (0.5 * self.RHO * (v_target ** 2)) / 1e5
-        steady_state_p = self.NOMINAL_PRESSURE_BAR + dynamic_head_bar
-
-        # Water hammer transient shock (if sudden transition)
-        surge_bar = (self.RHO * self.C_WAVE * abs(delta_v)) / 1e5 if delta_v > 0 else 0.0
-        total_peak_p = steady_state_p + surge_bar
-
-        is_burst = total_peak_p >= self.BURST_PRESSURE_BAR
-        is_safe = (self.MIN_SAFE_RPM <= target_rpm <= self.MAX_SAFE_RPM) and not is_burst
-
-        return {
-            "target_rpm": target_rpm,
-            "velocity_m_s": round(float(v_target), 2),
-            "peak_pressure_bar": round(float(total_peak_p), 2),
-            "burst_limit_bar": self.BURST_PRESSURE_BAR,
-            "verdict": "ALLOW" if is_safe else ("DROP [PIPE BURST RISK]" if is_burst else "DROP [RPM LIMIT]")
-        }
-
-if __name__ == "__main__":
-    model = PipelinePhysics()
-    print("=" * 70)
-    print("  VoltGuard: Fluid Dynamics & Pipe Burst Physics Baseline (SciPy)  ")
-    print("=" * 70)
+def verify_physics_envelope():
+    print("=" * 72)
+    print("  VoltGuard Physics Engine: Mathematical Baseline & Verification      ")
+    print("=" * 72)
 
     scenarios = [
-        ("Normal Safe Setpoint", 1800, 1800),
-        ("Safe Transition Step", 1800, 2400),
-        ("Sub-Operational Cavitation", 1800, 300),
-        ("Malicious Exploit (50,000 RPM)", 1800, 50000)
+        ("Nominal Operation", 1800, 1850),
+        ("Ramp Acceleration", 1800, 2400),
+        ("Mechanical Limit", 1800, 3600),
+        ("Stuxnet Overspeed Attack", 1800, 50000),
+        ("Cavitation Stall", 1800, 300)
     ]
 
-    for name, curr, tgt in scenarios:
-        res = model.evaluate_setpoint(curr, tgt)
-        print(f"\n[SCENARIO] {name} -> Setpoint: {tgt} RPM")
-        print(f"  Discharge Velocity : {res['velocity_m_s']} m/s")
-        print(f"  Peak Total Pressure: {res['peak_pressure_bar']} Bar (Max Limit: 16.0 Bar)")
-        print(f"  Physics Verdict    : {res['verdict']}")
+    for name, initial_rpm, commanded_rpm in scenarios:
+        shock = calculate_joukowsky_shock(commanded_rpm - initial_rpm)
+        exceeds_rpm = commanded_rpm > MAX_SAFE_RPM
+        exceeds_shock = shock > PIPE_BURST_BAR
+
+        verdict = "ALLOW"
+        if exceeds_rpm or exceeds_shock or commanded_rpm < 500:
+            verdict = "DROP (Tripwire Triggered)"
+
+        print(f"Scenario: {name:<26} | Target: {commanded_rpm:>6} RPM | Shock: {shock:>7.2f} Bar | {verdict}")
+
+    print("=" * 72)
+    print("Physics Baseline Confirmed: Tripwire Ceilings at 3,600 RPM & 16.0 Bar Shock.")
+
+if __name__ == "__main__":
+    verify_physics_envelope()
