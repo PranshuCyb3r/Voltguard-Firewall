@@ -2,61 +2,53 @@ import socket
 import struct
 import time
 
-SERVER_HOST = "127.0.0.1"
+SERVER_IP = "127.0.0.1"
 SERVER_PORT = 5502
 
-def build_modbus_write_packet(tx_id: int, reg_addr: int, reg_val: int) -> bytes:
-    # Modbus TCP Header (MBAP): TxID(2), ProtoID(2=0), Length(2=6), UnitID(1=1)
-    # PDU: FunctionCode(1=0x06 Write Single Register), Address(2), Value(2)
-    mbap = struct.pack(">HHHB", tx_id, 0x0000, 6, 1)
-    pdu = struct.pack(">BHH", 0x06, reg_addr, reg_val)
-    return mbap + pdu
+TEST_PACKETS = [
+    {"name": "Normal Baseline Pump Speed",           "tx_id": 0x0101, "rpm": 1800},
+    {"name": "Stuxnet Destructive Overspeed Attack", "tx_id": 0x0102, "rpm": 50000},
+    {"name": "Sub-Idle Cavitation Attack",           "tx_id": 0x0103, "rpm": 300},
+    {"name": "Valid Mid-Range Speed Transition",     "tx_id": 0x0104, "rpm": 2400},
+    {"name": "Slight Over-Ceiling Actuation",         "tx_id": 0x0105, "rpm": 3800},
+]
 
-def send_scada_command(test_label: str, tx_id: int, rpm: int, delay_after: float = 1.0):
-    print(f"\n[SCADA Transmission] {test_label} -> Commanded: {rpm:,} RPM")
-    packet = build_modbus_write_packet(tx_id, 0x0001, rpm)
-    
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(2.0)
-    try:
-        sock.connect((SERVER_HOST, SERVER_PORT))
-        sock.sendall(packet)
-        response = sock.recv(1024).decode('utf-8', errors='ignore').strip()
-        print(f"  [FIREWALL VERDICT] -> {response}")
-    except ConnectionRefusedError:
-        print("  [ERROR] Connection Refused! Is server.exe running on port 5502?")
-    except socket.timeout:
-        print("  [ERROR] Server socket timed out.")
-    except Exception as e:
-        print(f"  [ERROR] Failed: {e}")
-    finally:
-        sock.close()
-    
-    time.sleep(delay_after)
+def build_modbus_frame(tx_id, register_address, rpm_value):
+    return struct.pack(">HHHBBHH", tx_id, 0x0000, 0x0006, 0x01, 0x06, register_address, rpm_value)
 
-def run_test_suite():
-    print("=" * 72)
+def run_tests():
+    print("========================================================================")
     print("        VoltGuard Real-Time Network Packet Injection Suite              ")
-    print("=" * 72)
+    print("========================================================================")
 
-    # 1. Normal Base SCADA command
-    send_scada_command("Normal Baseline Pump Speed", tx_id=0x0101, rpm=1800, delay_after=1.2)
+    for test in TEST_PACKETS:
+        tx_id = test["tx_id"]
+        rpm = test["rpm"]
+        name = test["name"]
 
-    # 2. Stuxnet-Style Destructive Overspeed
-    send_scada_command("Stuxnet Destructive Overspeed Attack", tx_id=0x0102, rpm=50000, delay_after=1.2)
+        packet = build_modbus_frame(tx_id, 0x0001, rpm)
 
-    # 3. Sub-Idle Low-Frequency Cavitation Attack
-    send_scada_command("Sub-Idle Cavitation Attack", tx_id=0x0103, rpm=300, delay_after=1.2)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(2.0)
+                s.connect((SERVER_IP, SERVER_PORT))
+                s.sendall(packet)
+                resp = s.recv(1024)
 
-    # 4. Valid Mid-Range Operating Transition
-    send_scada_command("Valid Mid-Range Speed Transition", tx_id=0x0104, rpm=2400, delay_after=1.2)
+                print(f"[SCADA Transmission] {name} -> Commanded: {rpm:,} RPM")
+                # Modbus Exception response has Function Code 0x86 (0x80 | 0x06) at byte index 7
+                if len(resp) >= 8 and (resp[7] == 0x86 or resp[7] > 0x80):
+                    print("  [FIREWALL VERDICT] -> STATUS: BLOCKED_BY_VOLTGUARD_PHYSICS_ENGINE")
+                else:
+                    print("  [FIREWALL VERDICT] -> STATUS: ALLOWED")
+        except Exception as e:
+            print(f"  [ERROR] Transmission failed: {e}")
 
-    # 5. Over-Ceiling Dynamic Transient
-    send_scada_command("Slight Over-Ceiling Actuation", tx_id=0x0105, rpm=3800, delay_after=0.5)
+        time.sleep(0.4)
 
-    print("=" * 72)
+    print("========================================================================")
     print("  Test execution completed. Check server.exe & voltguard.py for live sync! ")
-    print("=" * 72)
+    print("========================================================================")
 
 if __name__ == "__main__":
-    run_test_suite()
+    run_tests()
