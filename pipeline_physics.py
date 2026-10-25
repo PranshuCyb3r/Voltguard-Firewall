@@ -8,11 +8,10 @@ def fluid_dynamics_model(y, t, commanded_rpm):
     tau_motor = 0.15 # seconds
     drpm_dt = (commanded_rpm - rpm) / tau_motor
     
-    # Joukowsky transient shock differential: dP/dt
-    # Delta P = rho * a * Delta v
-    rho = 998.2   # kg/m^3
-    a = 1480.0    # m/s
-    k_v = 0.0016  # RPM to m/s
+    # Joukowsky transient shock differential: dP/dt = rho * a * (dv/dt)
+    rho = 998.2   # kg/m^3 (Water density)
+    a = 1480.0    # m/s (Chamber acoustic sound speed)
+    k_v = 0.0016  # RPM to m/s conversion constant
     
     dp_dt = (rho * a * k_v * drpm_dt) / 100000.0 # Bar/sec
     return [drpm_dt, dp_dt]

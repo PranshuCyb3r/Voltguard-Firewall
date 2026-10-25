@@ -1,5 +1,4 @@
 #include <iostream>
-#include <vector>
 #include <chrono>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -18,7 +17,7 @@ int main() {
         return 1;
     }
 
-    // 1. TCP Socket for Ingress Modbus SCADA Traffic (Port 5502)
+    // 1. TCP Server Socket for SCADA Ingress Traffic (Port 5502)
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
@@ -34,7 +33,7 @@ int main() {
     }
     listen(server_fd, 5);
 
-    // 2. UDP Socket for Emitting 32-Byte Telemetry to Qt Visualizer (Port 5555)
+    // 2. UDP Client Socket for Broadcasting 32-Byte Telemetry to Qt Dashboard (Port 5555)
     SOCKET udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
     sockaddr_in udp_dest{};
     udp_dest.sin_family = AF_INET;
@@ -42,10 +41,10 @@ int main() {
     inet_pton(AF_INET, "127.0.0.1", &udp_dest.sin_addr);
 
     std::cout << "========================================================================\n";
-    std::cout << " [VoltGuard] Week 2 & Mid-Review: Telemetry Pipeline Active            \n";
+    std::cout << " [VoltGuard] Tactical OT Physics Firewall & Live Ingress Daemon Active  \n";
     std::cout << "========================================================================\n";
     std::cout << "[+] Listening for Modbus traffic on TCP port " << TCP_PORT << "...\n";
-    std::cout << "[+] Broadcasting Telemetry on UDP port " << UDP_PORT << " (For Qt Dashboard)...\n";
+    std::cout << "[+] Broadcasting Telemetry on UDP port " << UDP_PORT << " (32-Byte Frame)...\n";
     std::cout << "------------------------------------------------------------------------\n";
 
     while (true) {
@@ -91,11 +90,11 @@ int main() {
             telemetry.joukowsky_bar = shock_bar;
             telemetry.verdict = is_allowed ? 1 : 0;
 
-            // Broadcast to Qt Dashboard over UDP
+            // Broadcast to Qt Dashboard over UDP Port 5555
             sendto(udp_sock, (const char*)&telemetry, sizeof(TelemetryFrame), 0,
                    (struct sockaddr*)&udp_dest, sizeof(udp_dest));
 
-            // SCADA Response: Echo if Allowed, Exception 0x86 if Blocked
+            // Return response to client: Echo original packet if ALLOW, or return Modbus Exception 0x86 if DROP
             if (is_allowed) {
                 send(client_sock, (const char*)buffer, bytes_read, 0);
             } else {

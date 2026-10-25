@@ -13,10 +13,10 @@ void print_hex(const uint8_t* data, size_t len) {
 
 int main() {
     std::cout << "========================================================================\n";
-    std::cout << " [VoltGuard] Mid-Project Review: Hexadecimal Wire & Physics Audit Benchmark\n";
+    std::cout << " [VoltGuard] Mid-Project Review: Hexadecimal Wire & Physics Audit Proof\n";
     std::cout << "========================================================================\n";
 
-    // Modbus Hex Frame for 50,000 RPM (0xC350) Attack:
+    // Raw Modbus Hex Frame for 50,000 RPM (0xC350) Overspeed Attack:
     // TxID: 0x0002 | Proto: 0x0000 | Len: 0x0006 | Unit: 0x01 | FC: 0x06 | Reg: 0x0001 | Val: 0xC350
     uint8_t attack_wire[] = {
         0x00, 0x02, 0x00, 0x00, 0x00, 0x06, 0x01, 0x06, 0x00, 0x01, 0xC3, 0x50

@@ -6,19 +6,13 @@ from collections import deque
 from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
-# Strict 32-Byte Wire Layout:
-# uint64_t timestamp_ns (8B) | uint16_t tx_id (2B) | uint16_t reg (2B) |
-# float rpm (4B) | float shock (4B) | uint8_t verdict (1B) | uint8_t reserved[11] (11B)
-# 8 + 2 + 2 + 4 + 4 + 1 + 11 = 32 Bytes
-FRAME_FORMAT = "<QHHffB7s"
-FRAME_SIZE = struct.calcsize(FRAME_FORMAT)
 TELEMETRY_PORT = 5555
 
 class VoltGuardTacticalRedWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("VoltGuard - Industrial OT Physics Firewall (Tactical Red)")
-        self.resize(1100, 680)
+        self.resize(1150, 700)
         self.setStyleSheet("background-color: #0a0e17; color: #ffffff; font-family: 'Segoe UI', Consolas, sans-serif;")
 
         self.max_points = 120
@@ -36,10 +30,10 @@ class VoltGuardTacticalRedWindow(QtWidgets.QMainWindow):
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QtWidgets.QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(18, 18, 18, 18)
+        main_layout.setSpacing(14)
 
-        # Header
+        # Header Section
         header_layout = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel("VOLTGUARD :: RED TACTICAL OT FIREWALL & JOUKOWSKY STREAM")
         title.setStyleSheet("font-size: 15px; font-weight: 800; color: #ffffff; letter-spacing: 1px;")
@@ -74,7 +68,7 @@ class VoltGuardTacticalRedWindow(QtWidgets.QMainWindow):
             cards_layout.addWidget(w)
         main_layout.addLayout(cards_layout)
 
-        # PyQtGraph Visualization
+        # PyQtGraph Real-Time Canvas
         pg.setConfigOptions(antialias=True)
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground("#05080e")
@@ -93,7 +87,7 @@ class VoltGuardTacticalRedWindow(QtWidgets.QMainWindow):
         )
         self.plot_widget.addItem(self.limit_line)
 
-        # White/Red Shaft Telemetry Curve
+        # Commanded Motor RPM Curve (White line with Red points)
         self.rpm_curve = self.plot_widget.plot(
             pen=pg.mkPen(color='#ffffff', width=2.5),
             symbol='o', symbolSize=7, symbolBrush='#ef4444',
@@ -101,7 +95,7 @@ class VoltGuardTacticalRedWindow(QtWidgets.QMainWindow):
         )
         main_layout.addWidget(self.plot_widget)
 
-        # 50 FPS Timer (20ms)
+        # 50 FPS Processing Timer (20ms)
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.process_packets)
         self.timer.start(20)
@@ -113,33 +107,37 @@ class VoltGuardTacticalRedWindow(QtWidgets.QMainWindow):
                 if not data:
                     break
 
-                if len(data) >= FRAME_SIZE:
-                    ts_ns, tx_id, reg, rpm, shock_bar, verdict, _ = struct.unpack(FRAME_FORMAT, data[:FRAME_SIZE])
-
-                    elapsed = round(time.time() - self.start_time, 2)
-                    self.time_points.append(elapsed)
-                    self.rpm_data.append(rpm)
-                    self.shock_data.append(shock_bar)
-
-                    self.rpm_curve.setData(list(self.time_points), list(self.rpm_data))
-
-                    self.lbl_rpm.setText(f"RPM: {rpm:,.0f} (Reg 0x{reg:04X})")
-                    self.lbl_shock.setText(f"Surge Shock: {shock_bar:.2f} Bar")
-
-                    if verdict == 1:
-                        self.lbl_verdict.setText(f"Verdict: [ ALLOWED ] (Tx: 0x{tx_id:X})")
-                        self.lbl_verdict.setStyleSheet("background-color: #14532d; border: 1px solid #22c55e; border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: bold; color: #ffffff;")
-                        self.lbl_tripwire.setText("State: NOMINAL LAMINAR")
-                        self.lbl_tripwire.setStyleSheet("background-color: #181b25; border: 1px solid #22c55e; border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: bold; color: #4ade80;")
-                    else:
-                        self.lbl_verdict.setText("Verdict: [ ATTACK INTERCEPTED / DROP ]")
-                        self.lbl_verdict.setStyleSheet("background-color: #7f1d1d; border: 1px solid #ef4444; border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: bold; color: #ffffff;")
-                        self.lbl_tripwire.setText("State: TRIPWIRE CEILING BREACH")
-                        self.lbl_tripwire.setStyleSheet("background-color: #7f1d1d; border: 1px solid #ef4444; border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: bold; color: #fca5a5;")
-
-                    print(f"[QT VISUALIZER] Plotted: TxID=0x{tx_id:X} | RPM={rpm:,.0f} | Shock={shock_bar:.2f} Bar | Verdict={'ALLOW' if verdict==1 else 'DROP'}")
+                # Support both 32-byte production frame and 28-byte legacy frame
+                if len(data) >= 32:
+                    ts_ns, tx_id, reg, rpm, shock_bar, verdict, _ = struct.unpack("<QHHffB11s", data[:32])
+                elif len(data) >= 28:
+                    ts_ns, tx_id, reg, rpm, shock_bar, verdict, _ = struct.unpack("<QHHffB7s", data[:28])
                 else:
-                    print(f"[WARNING] Received malformed packet of length {len(data)}, expected {FRAME_SIZE}")
+                    continue
+
+                elapsed = round(time.time() - self.start_time, 2)
+                self.time_points.append(elapsed)
+                self.rpm_data.append(rpm)
+                self.shock_data.append(shock_bar)
+
+                self.rpm_curve.setData(list(self.time_points), list(self.rpm_data))
+
+                self.lbl_rpm.setText(f"RPM: {rpm:,.0f} (Reg 0x{reg:04X})")
+                self.lbl_shock.setText(f"Surge Shock: {shock_bar:.2f} Bar")
+
+                if verdict == 1:
+                    self.lbl_verdict.setText(f"Verdict: [ ALLOWED ] (Tx: 0x{tx_id:X})")
+                    self.lbl_verdict.setStyleSheet("background-color: #14532d; border: 1px solid #22c55e; border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: bold; color: #ffffff;")
+                    self.lbl_tripwire.setText("State: NOMINAL LAMINAR")
+                    self.lbl_tripwire.setStyleSheet("background-color: #181b25; border: 1px solid #22c55e; border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: bold; color: #4ade80;")
+                else:
+                    self.lbl_verdict.setText("Verdict: [ ATTACK INTERCEPTED / DROP ]")
+                    self.lbl_verdict.setStyleSheet("background-color: #7f1d1d; border: 1px solid #ef4444; border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: bold; color: #ffffff;")
+                    self.lbl_tripwire.setText("State: TRIPWIRE CEILING BREACH")
+                    self.lbl_tripwire.setStyleSheet("background-color: #7f1d1d; border: 1px solid #ef4444; border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: bold; color: #fca5a5;")
+
+                print(f"[QT VISUALIZER] Plotted: TxID=0x{tx_id:X} | RPM={rpm:,.0f} | Shock={shock_bar:.2f} Bar | Verdict={'ALLOW' if verdict==1 else 'DROP'}")
+
             except BlockingIOError:
                 break
             except Exception as e:
