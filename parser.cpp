@@ -1,59 +1,58 @@
 #include <iostream>
-#include <chrono>
 #include <iomanip>
 #include "modbus_frame.hpp"
 #include "physics_engine.hpp"
 
-void print_hex(const uint8_t* data, size_t len) {
-    for (size_t i = 0; i < len; ++i) {
-        std::cout << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
-    }
-    std::cout << std::dec << "\n";
-}
-
 int main() {
     std::cout << "========================================================================\n";
-    std::cout << " [VoltGuard] Mid-Project Review: Hexadecimal Wire & Physics Audit Proof\n";
-    std::cout << "========================================================================\n";
+    std::cout << "  VOLTGUARD :: L2 ZERO-COPY PROTOCOL & INLINE PHYSICS PARSER DEMO       \n";
+    std::cout << "========================================================================\n\n";
 
-    // Raw Modbus Hex Frame for 50,000 RPM (0xC350) Overspeed Attack:
-    // TxID: 0x0002 | Proto: 0x0000 | Len: 0x0006 | Unit: 0x01 | FC: 0x06 | Reg: 0x0001 | Val: 0xC350
-    uint8_t attack_wire[] = {
-        0x00, 0x02, 0x00, 0x00, 0x00, 0x06, 0x01, 0x06, 0x00, 0x01, 0xC3, 0x50
+    VoltGuard::PhysicsEngine engine(1800.0f);
+
+    uint8_t normal_packet[12] = {
+        0x01, 0x01, 0x00, 0x00, 0x00, 0x06, 0x01, 0x06, 0x00, 0x01, 0x07, 0x08
     };
 
-    std::cout << "[Mid-Review Audit 1] Raw Wire Hex Ingress:\n  -> ";
-    print_hex(attack_wire, sizeof(attack_wire));
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    const auto* hdr = reinterpret_cast<const ModbusTcpHeader*>(attack_wire);
-
-    uint16_t tx_id = (hdr->transaction_id >> 8) | (hdr->transaction_id << 8);
-    uint16_t reg = (hdr->register_address >> 8) | (hdr->register_address << 8);
-    uint16_t rpm = (hdr->register_value >> 8) | (hdr->register_value << 8);
+    const auto* modbus = reinterpret_cast<const VoltGuard::ModbusTCPHeader*>(normal_packet);
+    uint16_t tx_id = VoltGuard::byteswap16(modbus->transaction_id);
+    uint16_t reg_addr = VoltGuard::byteswap16(modbus->register_address);
+    uint16_t rpm = VoltGuard::byteswap16(modbus->register_value);
 
     float shock = 0.0f;
-    VoltGuard::Verdict verdict = VoltGuard::PhysicsEngine::evaluate(rpm, shock);
-    auto t2 = std::chrono::high_resolution_clock::now();
+    VoltGuard::Verdict verdict = engine.evaluate(rpm, shock);
 
-    auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+    std::cout << "[INGRESS 1 - NORMAL LAMINAR]\n";
+    std::cout << "  Transaction ID : 0x" << std::hex << std::setw(4) << std::setfill('0') << tx_id << std::dec << "\n";
+    std::cout << "  Target Register: 0x" << std::hex << std::setw(4) << std::setfill('0') << reg_addr << std::dec << "\n";
+    std::cout << "  Commanded RPM  : " << rpm << " RPM\n";
+    std::cout << "  Joukowsky Shock: " << std::fixed << std::setprecision(2) << shock << " Bar\n";
+    std::cout << "  Firewall Rule  : " << (verdict == VoltGuard::Verdict::ALLOW ? "[ ALLOW: INVARIANT PASSED ]" : "[ DROP: BREACH ]") << "\n\n";
 
-    std::cout << "[Mid-Review Audit 1] Zero-Copy Ingress Breakdown:\n";
-    std::cout << "  - Transaction ID : 0x" << std::hex << tx_id << std::dec << "\n";
-    std::cout << "  - Function Code  : 0x06 (Preset Single Register)\n";
-    std::cout << "  - Register       : 0x" << std::hex << reg << std::dec << " (Shaft Speed)\n";
-    std::cout << "  - Injected RPM   : " << rpm << " RPM\n";
-    std::cout << "  - Joukowsky Surge: " << shock << " Bar\n";
-    std::cout << "  - Parsing Latency: " << elapsed_ns << " nanoseconds\n";
-    std::cout << "  - Engine Verdict : " << (verdict == VoltGuard::Verdict::ALLOW ? "ALLOW" : "DROP [INTERCEPTED]") << "\n";
-    std::cout << "------------------------------------------------------------------------\n";
-    std::cout << "[Mid-Review Audit 2] Impossible Physics Test (300 RPM Cavitation Stall):\n";
-    
+    uint8_t attack_packet[12] = {
+        0x01, 0x03, 0x00, 0x00, 0x00, 0x06, 0x01, 0x06, 0x00, 0x01, 0xC3, 0x50
+    };
+
+    const auto* atk_modbus = reinterpret_cast<const VoltGuard::ModbusTCPHeader*>(attack_packet);
+    uint16_t atk_tx = VoltGuard::byteswap16(atk_modbus->transaction_id);
+    uint16_t atk_rpm = VoltGuard::byteswap16(atk_modbus->register_value);
+
+    float atk_shock = 0.0f;
+    VoltGuard::Verdict atk_verdict = engine.evaluate(atk_rpm, atk_shock);
+
+    std::cout << "[INGRESS 2 - OVERPRESSURE CYBER ATTACK INJECTION]\n";
+    std::cout << "  Transaction ID : 0x" << std::hex << std::setw(4) << std::setfill('0') << atk_tx << std::dec << "\n";
+    std::cout << "  Commanded RPM  : " << atk_rpm << " RPM (MALICIOUS)\n";
+    std::cout << "  Joukowsky Shock: " << std::fixed << std::setprecision(2) << atk_shock << " Bar (Limit: 16.0 Bar)\n";
+    std::cout << "  Firewall Rule  : " << (atk_verdict == VoltGuard::Verdict::ALLOW ? "[ ALLOW ]" : "[ DROP: CATASTROPHIC INVARIANT BREACH INTERCEPTED ]") << "\n\n";
+
     float stall_shock = 0.0f;
-    VoltGuard::Verdict stall_v = VoltGuard::PhysicsEngine::evaluate(300, stall_shock);
-    std::cout << "  - Injected 300 RPM (Below 500 RPM Floor): " 
-              << (stall_v == VoltGuard::Verdict::DROP_INVALID_RANGE ? "TRAPPED & DROPPED (PASS)" : "FAILED") << "\n";
-    std::cout << "========================================================================\n";
+    VoltGuard::Verdict stall_v = engine.evaluate(300, stall_shock);
+    std::cout << "[INGRESS 3 - IMPELLER CAVITATION VACUUM TEST]\n";
+    std::cout << "  Commanded RPM  : 300 RPM\n";
+    std::cout << "  Joukowsky Shock: " << std::fixed << std::setprecision(2) << stall_shock << " Bar\n";
+    std::cout << "  Firewall Rule  : " << (stall_v == VoltGuard::Verdict::ALLOW ? "[ ALLOW ]" : "[ DROP: CAVITATION VACUUM FLOOR BREACH ]") << "\n";
 
+    std::cout << "========================================================================\n";
     return 0;
 }

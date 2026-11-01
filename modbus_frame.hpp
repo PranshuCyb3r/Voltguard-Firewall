@@ -2,31 +2,25 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace VoltGuard {
+
+    // Endianness converter for 16-bit Modbus integers
+    inline uint16_t byteswap16(uint16_t value) {
+        return static_cast<uint16_t>((value << 8) | (value >> 8));
+    }
+
 #pragma pack(push, 1)
-
-// Standard 12-Byte Modbus/TCP MBAP Request Frame (Write Single Register 0x06)
-struct ModbusTcpHeader {
-    uint16_t transaction_id;   // 2B (Big-Endian)
-    uint16_t protocol_id;      // 2B (Must be 0x0000)
-    uint16_t length;           // 2B (Number of remaining bytes = 0x0006)
-    uint8_t  unit_id;          // 1B (Slave ID)
-    uint8_t  function_code;    // 1B (0x06 = Preset/Write Single Register)
-    uint16_t register_address; // 2B (0x0001 = Commanded Shaft RPM)
-    uint16_t register_value;   // 2B (Commanded Value e.g. 0xC350 for 50,000 RPM)
-};
-
-// Strict 32-Byte Aligned Production Telemetry Frame (UDP Broadcast to Qt Dashboard)
-struct TelemetryFrame {
-    uint64_t timestamp_ns;     // 8 bytes: Unix timestamp in nanoseconds
-    uint16_t transaction_id;   // 2 bytes: Modbus TxID
-    uint16_t target_register;  // 2 bytes: Register address (0x0001)
-    float    injected_rpm;     // 4 bytes: Commanded shaft RPM
-    float    joukowsky_bar;    // 4 bytes: Calculated fluid shock pressure
-    uint8_t  verdict;          // 1 byte:  1 = ALLOW, 0 = DROP
-    uint8_t  reserved[11];     // 11 bytes: Cache alignment padding (Total = exactly 32 bytes)
-};
-
+    // Standard 12-Byte Modbus/TCP Master Request Header (FC06 / Single Register)
+    struct ModbusTCPHeader {
+        uint16_t transaction_id;   // Bytes 0-1
+        uint16_t protocol_id;      // Bytes 2-3 (0x0000 for Modbus)
+        uint16_t length;           // Bytes 4-5
+        uint8_t  unit_id;          // Byte 6
+        uint8_t  function_code;    // Byte 7 (e.g. 0x06 Write Single Register)
+        uint16_t register_address; // Bytes 8-9 (Target PLC Register)
+        uint16_t register_value;   // Bytes 10-11 (Commanded RPM)
+    };
 #pragma pack(pop)
 
-static_assert(sizeof(ModbusTcpHeader) == 12, "ModbusTcpHeader must be exactly 12 bytes");
-static_assert(sizeof(TelemetryFrame) == 32, "TelemetryFrame must be exactly 32 bytes aligned");
+    static_assert(sizeof(ModbusTCPHeader) == 12, "ModbusTCPHeader must be exactly 12 bytes");
+}

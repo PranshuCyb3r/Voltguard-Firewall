@@ -1,276 +1,279 @@
 import sys
 import socket
 import struct
-import time
 from collections import deque
 from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 
-# Telemetry Wire Configuration
-TELEMETRY_PORT = 5555
-FRAME_SIZE_32 = 32
-FRAME_SIZE_28 = 28
+# Configure pyqtgraph dark tactical theme
+pg.setConfigOption('background', '#0b0f17')
+pg.setConfigOption('foreground', '#94a3b8')
+pg.setConfigOption('antialias', True)
 
-class TacticalCard(QtWidgets.QFrame):
-    """Modern Cyber-Physical Instrumentation Metric Card"""
-    def __init__(self, title, default_val, accent_color="#ef4444"):
-        super().__init__()
-        self.accent_color = accent_color
-        self.setStyleSheet(f"""
-            QFrame {{
-                background-color: #0d121d;
-                border: 1px solid #1e2638;
-                border-top: 2px solid {accent_color};
-                border-radius: 6px;
-            }}
-        """)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(4)
-
-        self.title_lbl = QtWidgets.QLabel(title.upper())
-        self.title_lbl.setStyleSheet("color: #64748b; font-size: 10px; font-weight: 700; letter-spacing: 1px; border: none;")
-        
-        self.val_lbl = QtWidgets.QLabel(default_val)
-        self.val_lbl.setStyleSheet("color: #f8fafc; font-size: 16px; font-weight: 800; font-family: 'Consolas', monospace; border: none;")
-
-        layout.addWidget(self.title_lbl)
-        layout.addWidget(self.val_lbl)
-
-    def set_value(self, val, color=None):
-        self.val_lbl.setText(val)
-        if color:
-            self.val_lbl.setStyleSheet(f"color: {color}; font-size: 16px; font-weight: 800; font-family: 'Consolas', monospace; border: none;")
-
-class VoltGuardTacticalProWindow(QtWidgets.QMainWindow):
+class VoltGuardOscilloscope(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VoltGuard :: Cyber-Physical OT Ingress Console")
-        self.resize(1340, 820)
-        self.setStyleSheet("background-color: #070a10; color: #e2e8f0; font-family: 'Segoe UI', Consolas, sans-serif;")
+        self.setWindowTitle("VoltGuard :: Cyber-Physical OT Ingress Console & Physics Oscilloscope")
+        self.resize(1380, 850)
+        self.setStyleSheet("""
+            QMainWindow { background-color: #080b11; }
+            QLabel { color: #f1f5f9; font-family: 'Segoe UI', monospace; }
+        """)
 
-        self.max_points = 150
-        self.time_points = deque(maxlen=self.max_points)
-        self.rpm_data = deque(maxlen=self.max_points)
-        self.shock_data = deque(maxlen=self.max_points)
-        self.start_time = time.time()
+        # Data Deques
+        self.history_len = 100
+        self.time_history = deque(maxlen=self.history_len)
+        self.rpm_history = deque(maxlen=self.history_len)
+        self.twin_history = deque(maxlen=self.history_len)
+        self.sample_idx = 0
 
-        # Non-blocking UDP Socket bound to 0.0.0.0
-        self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.udp_sock.bind(("0.0.0.0", TELEMETRY_PORT))
-        self.udp_sock.setblocking(False)
+        # Initial baseline visualization points
+        for i in range(5):
+            self.time_history.append(float(i))
+            self.rpm_history.append(1800.0)
+            self.twin_history.append(1800.0)
+        self.sample_idx = 4
 
         self.init_ui()
-
-        # 50 FPS Real-time Refresh Loop
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.process_packets)
-        self.timer.start(20)
+        self.init_udp_socket()
 
     def init_ui(self):
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
-        root_layout = QtWidgets.QHBoxLayout(central)
-        root_layout.setContentsMargins(16, 16, 16, 16)
-        root_layout.setSpacing(14)
+        main_widget = QtWidgets.QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QtWidgets.QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(16)
 
-        # ---------------- 1. LEFT SIDEBAR: OT HARDWARE CHASSIS ----------------
+        # ----------------- LEFT SIDEBAR -----------------
         sidebar = QtWidgets.QFrame()
-        sidebar.setFixedWidth(240)
+        sidebar.setFixedWidth(280)
         sidebar.setStyleSheet("""
             QFrame {
-                background-color: #0b0f19;
-                border: 1px solid #1a2233;
+                background-color: #0f141f;
+                border: 1px solid #1e293b;
                 border-radius: 8px;
             }
         """)
-        side_layout = QtWidgets.QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(14, 14, 14, 14)
-        side_layout.setSpacing(10)
+        sb_layout = QtWidgets.QVBoxLayout(sidebar)
+        sb_layout.setContentsMargins(14, 14, 14, 14)
+        sb_layout.setSpacing(12)
 
-        brand_badge = QtWidgets.QLabel("VOLTGUARD // ENCLAVE")
-        brand_badge.setStyleSheet("color: #ef4444; font-size: 12px; font-weight: 900; letter-spacing: 1.5px; border: none;")
-        side_layout.addWidget(brand_badge)
+        title_lbl = QtWidgets.QLabel("VOLTGUARD // ENCLAVE\n<span style='font-size:11px; color:#ef4444;'>KINETIC-PHYSICS FIREWALL</span>")
+        title_lbl.setStyleSheet("font-size: 15px; font-weight: bold; border: none;")
+        sb_layout.addWidget(title_lbl)
 
-        sub_brand = QtWidgets.QLabel("KINETIC-PHYSICS FIREWALL")
-        sub_brand.setStyleSheet("color: #64748b; font-size: 9px; font-weight: bold; border: none;")
-        side_layout.addWidget(sub_brand)
+        # Invariant Reference Box
+        rules_box = QtWidgets.QGroupBox("PHYSICAL BOUNDS")
+        rules_box.setStyleSheet("QGroupBox { color: #38bdf8; font-weight: bold; border: 1px solid #1e293b; margin-top: 10px; padding: 10px; }")
+        rb_layout = QtWidgets.QVBoxLayout(rules_box)
+        rb_layout.addWidget(QtWidgets.QLabel("Rotor Shear Max: <b style='color:#ef4444;'>3,600 RPM</b>"))
+        rb_layout.addWidget(QtWidgets.QLabel("Nominal Baseline: <b style='color:#10b981;'>1,800 RPM</b>"))
+        rb_layout.addWidget(QtWidgets.QLabel("Cavitation Floor: <b style='color:#f59e0b;'>500 RPM</b>"))
+        rb_layout.addWidget(QtWidgets.QLabel("Max Pipe Shock: <b style='color:#ef4444;'>16.0 Bar</b>"))
+        sb_layout.addWidget(rules_box)
 
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        sep.setStyleSheet("border-color: #1e293b;")
-        side_layout.addWidget(sep)
+        # Network Stats
+        net_box = QtWidgets.QGroupBox("MICROSECOND BUS")
+        net_box.setStyleSheet("QGroupBox { color: #a855f7; font-weight: bold; border: 1px solid #1e293b; margin-top: 10px; padding: 10px; }")
+        nb_layout = QtWidgets.QVBoxLayout(net_box)
+        nb_layout.addWidget(QtWidgets.QLabel("[+] Ingress Port: <b>TCP 5502</b>"))
+        nb_layout.addWidget(QtWidgets.QLabel("[+] Telemetry UDP: <b>UDP 5555</b>"))
+        nb_layout.addWidget(QtWidgets.QLabel("[+] Frame Size: <b>32 Bytes Packed</b>"))
+        nb_layout.addWidget(QtWidgets.QLabel("[+] Inspection Latency: <b style='color:#10b981;'>&lt; 1.0 μs</b>"))
+        sb_layout.addWidget(net_box)
 
-        # Operational Tripwires Box
-        bounds_title = QtWidgets.QLabel("PHYSICAL BOUNDS")
-        bounds_title.setStyleSheet("color: #94a3b8; font-size: 10px; font-weight: 700; border: none;")
-        side_layout.addWidget(bounds_title)
+        sb_layout.addStretch()
 
-        limits_text = """
-        <div style='font-family: Consolas; font-size: 11px; line-height: 1.8;'>
-          <span style='color:#64748b;'>Rotor Max:</span> <b style='color:#ef4444;'>3,600 RPM</b><br/>
-          <span style='color:#64748b;'>Cavitation:</span> <b style='color:#eab308;'>500 RPM</b><br/>
-          <span style='color:#64748b;'>Max Shock:</span> <b style='color:#f87171;'>16.0 Bar</b><br/>
-          <span style='color:#64748b;'>Nominal:</span> <b style='color:#22c55e;'>1,800 RPM</b>
-        </div>
-        """
-        limits_lbl = QtWidgets.QLabel(limits_text)
-        limits_lbl.setStyleSheet("border: none; padding: 4px 0;")
-        side_layout.addWidget(limits_lbl)
+        status_tag = QtWidgets.QLabel("● AIR-GAPPED ENCLAVE ACTIVE")
+        status_tag.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        status_tag.setStyleSheet("background-color: #450a0a; color: #ef4444; border: 1px solid #ef4444; border-radius: 4px; padding: 6px; font-weight: bold;")
+        sb_layout.addWidget(status_tag)
 
-        side_layout.addStretch()
+        main_layout.addWidget(sidebar)
 
-        # Hardware Enclave Telemetry
-        enclave_status = """
-        <div style='font-family: Consolas; font-size: 10px; line-height: 1.6; color: #475569;'>
-          [+] DIN Rail: <span style='color:#22c55e;'>24.1V OK</span><br/>
-          [+] Hardware Key: <span style='color:#38bdf8;'>ARMED</span><br/>
-          [+] Zero-Copy: <span style='color:#22c55e;'>ACTIVE</span><br/>
-          [+] Ingress Port: <span style='color:#f8fafc;'>TCP 5502</span>
-        </div>
-        """
-        hw_lbl = QtWidgets.QLabel(enclave_status)
-        hw_lbl.setStyleSheet("border: none;")
-        side_layout.addWidget(hw_lbl)
+        # ----------------- RIGHT CONTENT -----------------
+        content_layout = QtWidgets.QVBoxLayout()
+        content_layout.setSpacing(12)
 
-        root_layout.addWidget(sidebar)
+        # 1. Header Badges
+        header_bar = QtWidgets.QHBoxLayout()
+        h_title = QtWidgets.QLabel("REAL-TIME KINEMATIC OSCILLOSCOPE & INGRESS JOURNAL")
+        h_title.setStyleSheet("font-size: 17px; font-weight: bold; color: #f8fafc;")
+        header_bar.addWidget(h_title)
+        header_bar.addStretch()
 
-        # ---------------- 2. MAIN COCKPIT AREA ----------------
-        main_cockpit = QtWidgets.QVBoxLayout()
-        main_cockpit.setSpacing(12)
+        badge_udp = QtWidgets.QLabel("● UDP:5555 STREAM ACTIVE")
+        badge_udp.setStyleSheet("background-color: #064e3b; color: #10b981; border: 1px solid #10b981; border-radius: 4px; padding: 4px 10px; font-size: 11px; font-weight: bold;")
+        header_bar.addWidget(badge_udp)
 
-        # Top Tactical Status Ribbon
-        hud_bar = QtWidgets.QHBoxLayout()
-        
-        hud_title = QtWidgets.QLabel("REAL-TIME OSCILLOSCOPE & INGRESS JOURNAL")
-        hud_title.setStyleSheet("font-size: 13px; font-weight: 800; color: #f8fafc; letter-spacing: 0.5px;")
-        hud_bar.addWidget(hud_title)
+        content_layout.addLayout(header_bar)
 
-        hud_bar.addStretch()
+        # 2. Metric KPI Cards Row
+        cards_layout = QtWidgets.QHBoxLayout()
+        cards_layout.setSpacing(10)
 
-        self.pill_stream = QtWidgets.QLabel("● UDP:5555 STREAM ACTIVE")
-        self.pill_stream.setStyleSheet("background: #064e3b; color: #34d399; font-size: 10px; font-weight: 800; padding: 4px 10px; border-radius: 4px;")
-        hud_bar.addWidget(self.pill_stream)
+        self.card_rpm = self.create_kpi_card("COMMANDED SHAFT SPEED", "1,800 RPM", "#38bdf8")
+        self.card_shock = self.create_kpi_card("JOUKOWSKY SHOCK (ΔP)", "7.75 Bar", "#38bdf8")
+        self.card_twin = self.create_kpi_card("DIGITAL TWIN (RK4)", "1,800 RPM", "#f59e0b")
+        self.card_verdict = self.create_kpi_card("DETERMINISTIC L2 VERDICT", "[ ALLOW: INVARIANT VALID ]", "#10b981")
 
-        self.pill_airgap = QtWidgets.QLabel("AIR-GAPPED ENCLAVE")
-        self.pill_airgap.setStyleSheet("background: #7f1d1d; color: #fecaca; font-size: 10px; font-weight: 800; padding: 4px 10px; border-radius: 4px;")
-        hud_bar.addWidget(self.pill_airgap)
+        cards_layout.addWidget(self.card_rpm)
+        cards_layout.addWidget(self.card_shock)
+        cards_layout.addWidget(self.card_twin)
+        cards_layout.addWidget(self.card_verdict)
+        content_layout.addLayout(cards_layout)
 
-        main_cockpit.addLayout(hud_bar)
-
-        # KPI Metrics Header
-        cards_row = QtWidgets.QHBoxLayout()
-        cards_row.setSpacing(10)
-
-        self.card_rpm = TacticalCard("Commanded Shaft Speed", "-- RPM", "#38bdf8")
-        self.card_shock = TacticalCard("Joukowsky Shock (ΔP)", "-- Bar", "#ef4444")
-        self.card_state = TacticalCard("Enclave Boundary State", "STANDBY", "#94a3b8")
-        self.card_verdict = TacticalCard("Deterministic Verdict", "LISTENING...", "#22c55e")
-
-        cards_row.addWidget(self.card_rpm)
-        cards_row.addWidget(self.card_shock)
-        cards_row.addWidget(self.card_state)
-        cards_row.addWidget(self.card_verdict)
-        main_cockpit.addLayout(cards_row)
-
-        # High-Contrast Oscilloscope Plot
-        pg.setConfigOptions(antialias=True)
+        # 3. High-Clarity Plot Widget
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground("#05080e")
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.18)
-        self.plot_widget.setLabel('bottom', "Relative Time (Seconds)", color='#64748b')
-        self.plot_widget.setLabel('left', "Shaft RPM", color='#cbd5e1')
-        self.plot_widget.setYRange(0, 55000, padding=0.04)
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
+        self.plot_widget.setLabel('left', 'Shaft Velocity (RPM)', color='#94a3b8', size='12pt')
+        self.plot_widget.setLabel('bottom', 'Relative Telemetry Sequence (Packets / Time)', color='#94a3b8', size='12pt')
+        
+        # Initial View Limits
+        self.plot_widget.setYRange(0, 4500, padding=0.05)
+        self.plot_widget.setXRange(0, 10, padding=0.05)
 
-        # Limit Line 1: Tripwire Ceiling (3,600 RPM)
-        self.limit_ceiling = pg.InfiniteLine(
-            pos=3600, angle=0,
-            pen=pg.mkPen(color='#ef4444', width=2, style=QtCore.Qt.PenStyle.DashLine),
-            label="DYNAMIC ROTOR LIMIT: 3,600 RPM",
-            labelOpts={'position': 0.85, 'color': '#ef4444', 'movable': False}
+        # Threshold Visual Zone Lines
+        self.tripwire_line = pg.InfiniteLine(
+            pos=3600, angle=0, 
+            pen=pg.mkPen(color='#ef4444', width=2, style=QtCore.Qt.PenStyle.DashLine), 
+            label="DYNAMIC ROTOR LIMIT: 3,600 RPM", 
+            labelOpts={'position': 0.85, 'color': '#ef4444'}
         )
-        self.plot_widget.addItem(self.limit_ceiling)
-
-        # Limit Line 2: Cavitation Floor (500 RPM)
-        self.limit_floor = pg.InfiniteLine(
-            pos=500, angle=0,
-            pen=pg.mkPen(color='#eab308', width=1.5, style=QtCore.Qt.PenStyle.DotLine),
-            label="CAVITATION FLOOR: 500 RPM",
-            labelOpts={'position': 0.15, 'color': '#eab308', 'movable': False}
+        self.cavitation_line = pg.InfiniteLine(
+            pos=500, angle=0, 
+            pen=pg.mkPen(color='#f59e0b', width=1.5, style=QtCore.Qt.PenStyle.DotLine), 
+            label="CAVITATION FLOOR: 500 RPM", 
+            labelOpts={'position': 0.15, 'color': '#f59e0b'}
         )
-        self.plot_widget.addItem(self.limit_floor)
+        
+        self.plot_widget.addItem(self.tripwire_line)
+        self.plot_widget.addItem(self.cavitation_line)
 
-        # Active Commanded Waveform
-        self.rpm_curve = self.plot_widget.plot(
-            pen=pg.mkPen(color='#ffffff', width=2.5),
-            symbol='o', symbolSize=8, symbolBrush='#ef4444', symbolPen=pg.mkPen('#ffffff', width=1),
-            name="Commanded RPM Curve"
+        # Curves
+        self.curve_wire = self.plot_widget.plot(
+            list(self.time_history), list(self.rpm_history),
+            pen=pg.mkPen(color='#38bdf8', width=2.5),
+            symbol='o', symbolSize=8, symbolBrush='#38bdf8', symbolPen='w',
+            name="Commanded Wire Ingress"
         )
-        main_cockpit.addWidget(self.plot_widget, stretch=4)
+        self.curve_twin = self.plot_widget.plot(
+            list(self.time_history), list(self.twin_history),
+            pen=pg.mkPen(color='#f59e0b', width=2, style=QtCore.Qt.PenStyle.DashLine),
+            name="RK4 Digital Twin Model"
+        )
 
-        # Log Strip Console at Bottom
-        self.log_terminal = QtWidgets.QLabel("VoltGuard Live Telemetry Ingress Ready. Waiting for SCADA packet injection on TCP port 5502...")
-        self.log_terminal.setStyleSheet("""
-            background-color: #090d16;
+        content_layout.addWidget(self.plot_widget, stretch=4)
+
+        # 4. Ingress Journal Terminal Strip
+        self.terminal_lbl = QtWidgets.QLabel("[INGRESS JOURNAL] Ready. Waiting for telemetry frames from server.exe...")
+        self.terminal_lbl.setStyleSheet("""
+            background-color: #0b0f19;
             color: #64748b;
-            font-family: 'Consolas', monospace;
-            font-size: 11px;
-            padding: 8px 12px;
-            border: 1px solid #1e2638;
+            border: 1px solid #1e293b;
             border-radius: 4px;
+            padding: 8px;
+            font-family: Consolas, monospace;
+            font-size: 12px;
         """)
-        main_cockpit.addWidget(self.log_terminal, stretch=0)
+        content_layout.addWidget(self.terminal_lbl)
 
-        root_layout.addLayout(main_cockpit)
+        main_layout.addLayout(content_layout, stretch=1)
 
-    def process_packets(self):
+    def create_kpi_card(self, title, val_text, color):
+        card = QtWidgets.QFrame()
+        card.setStyleSheet("""
+            QFrame {
+                background-color: #0f141f;
+                border: 1px solid #1e293b;
+                border-radius: 6px;
+                padding: 10px;
+            }
+        """)
+        layout = QtWidgets.QVBoxLayout(card)
+        layout.setContentsMargins(6, 6, 6, 6)
+        lbl_title = QtWidgets.QLabel(title)
+        lbl_title.setStyleSheet("font-size: 10px; color: #94a3b8; font-weight: bold; border:none;")
+        lbl_val = QtWidgets.QLabel(val_text)
+        lbl_val.setStyleSheet(f"font-size: 17px; font-weight: bold; color: {color}; border:none;")
+        layout.addWidget(lbl_title)
+        layout.addWidget(lbl_val)
+        card.value_lbl = lbl_val
+        return card
+
+    def init_udp_socket(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setblocking(False)
+        try:
+            self.sock.bind(("127.0.0.1", 5555))
+        except Exception as e:
+            print(f"[ERROR] Socket bind failed on port 5555: {e}")
+
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self.poll_telemetry)
+        self.timer.start(25)  # 40 Hz polling rate
+
+    def poll_telemetry(self):
         while True:
             try:
-                data, _ = self.udp_sock.recvfrom(2048)
-                if not data:
-                    break
-
-                # Robust wire unpack (handles 32-byte production & 28-byte legacy)
-                if len(data) >= FRAME_SIZE_32:
-                    ts_ns, tx_id, reg, rpm, shock_bar, verdict, _ = struct.unpack("<QHHffB11s", data[:32])
-                elif len(data) >= FRAME_SIZE_28:
-                    ts_ns, tx_id, reg, rpm, shock_bar, verdict, _ = struct.unpack("<QHHffB7s", data[:28])
-                else:
-                    continue
-
-                elapsed = round(time.time() - self.start_time, 2)
-                self.time_points.append(elapsed)
-                self.rpm_data.append(rpm)
-                self.shock_data.append(shock_bar)
-
-                self.rpm_curve.setData(list(self.time_points), list(self.rpm_data))
-
-                # Update Card Values
-                self.card_rpm.set_value(f"{rpm:,.0f} RPM", "#ffffff")
-                self.card_shock.set_value(f"{shock_bar:.2f} Bar", "#ef4444" if shock_bar > 16.0 else "#38bdf8")
-
-                if verdict == 1:
-                    self.card_state.set_value("NOMINAL LAMINAR", "#22c55e")
-                    self.card_verdict.set_value("[ PERMIT DISPATCH ]", "#22c55e")
-                    log_msg = f"[INGRESS ALLOW] Tx: 0x{tx_id:04X} | Target Reg: 0x{reg:04X} | RPM: {rpm:,.0f} | Shock: {shock_bar:.2f} Bar -> INVARIANT SOUND"
-                else:
-                    reason = "ROTOR OVERSPEED BREACH" if rpm > 3600 else "CAVITATION STALL COLLAPSE"
-                    self.card_state.set_value(reason, "#ef4444")
-                    self.card_verdict.set_value("[ ATTACK INTERCEPTED ]", "#ef4444")
-                    log_msg = f"[INGRESS DROP] Tx: 0x{tx_id:04X} | Target Reg: 0x{reg:04X} | RPM: {rpm:,.0f} | Shock: {shock_bar:.2f} Bar -> TRIPPED & KILLED"
-
-                self.log_terminal.setText(log_msg)
-                print(log_msg)
-
-            except BlockingIOError:
+                data, _ = self.sock.recvfrom(256)
+                if len(data) == 32:
+                    # FIX: <IHHffB7sQ = 4 + 2 + 2 + 4 + 4 + 1 + 7 + 8 = 32 Bytes
+                    magic, tx_id, rpm, shock, twin_rpm, verdict, res, ts = struct.unpack("<IHHffB7sQ", data)
+                    if magic == 0x5647544D:
+                        self.update_telemetry(tx_id, rpm, shock, twin_rpm, verdict)
+            except (BlockingIOError, socket.error):
                 break
             except Exception as e:
-                print(f"[RECV ERROR] {e}")
+                print(f"[RECV EXCEPTION] {e}")
                 break
+
+    def update_telemetry(self, tx_id, rpm, shock, twin_rpm, verdict):
+        self.sample_idx += 1
+        t = float(self.sample_idx)
+
+        self.time_history.append(t)
+        self.rpm_history.append(float(rpm))
+        self.twin_history.append(float(twin_rpm))
+
+        # Update Plot Curves
+        x_data = list(self.time_history)
+        y_rpm = list(self.rpm_history)
+        y_twin = list(self.twin_history)
+
+        self.curve_wire.setData(x_data, y_rpm)
+        self.curve_twin.setData(x_data, y_twin)
+
+        # Dynamic Auto-Range for X-Axis
+        if len(x_data) > 1:
+            self.plot_widget.setXRange(max(0, x_data[-1] - 25), x_data[-1] + 2, padding=0.02)
+
+        # Dynamic Y-Range Expansion for large attack spikes
+        current_max = max(y_rpm)
+        if current_max > 4500:
+            self.plot_widget.setYRange(0, max(current_max * 1.15, 55000), padding=0.05)
+        else:
+            self.plot_widget.setYRange(0, 4500, padding=0.05)
+
+        # Update Metric KPI Cards
+        self.card_rpm.value_lbl.setText(f"{rpm:,} RPM")
+        self.card_shock.value_lbl.setText(f"{shock:.2f} Bar")
+        self.card_twin.value_lbl.setText(f"{int(twin_rpm):,} RPM")
+
+        # Update Verdict Card & Journal Strip
+        if verdict == 1:
+            self.card_verdict.value_lbl.setText("[ ALLOW: INVARIANT VALID ]")
+            self.card_verdict.value_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #10b981; border:none;")
+            self.terminal_lbl.setText(f"[INGRESS ALLOW] Tx: 0x{tx_id:04X} | Target Reg: 0x0001 | RPM: {rpm:,} | Shock: {shock:.2f} Bar | Invariant Valid")
+            self.terminal_lbl.setStyleSheet("background-color: #064e3b; color: #10b981; border: 1px solid #10b981; border-radius: 4px; padding: 8px; font-family: Consolas, monospace; font-size: 12px;")
+        else:
+            self.card_verdict.value_lbl.setText("[ ATTACK INTERCEPTED / DROP ]")
+            self.card_verdict.value_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #ef4444; border:none;")
+            self.terminal_lbl.setText(f"[INGRESS DROP] Tx: 0x{tx_id:04X} | Target Reg: 0x0001 | RPM: {rpm:,} | Shock: {shock:.2f} Bar -> TRIPPED & KILLED")
+            self.terminal_lbl.setStyleSheet("background-color: #450a0a; color: #ef4444; border: 1px solid #ef4444; border-radius: 4px; padding: 8px; font-family: Consolas, monospace; font-size: 12px;")
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    window = VoltGuardTacticalProWindow()
-    window.show()
+    win = VoltGuardOscilloscope()
+    win.show()
     sys.exit(app.exec())
