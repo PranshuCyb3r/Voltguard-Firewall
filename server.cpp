@@ -1,112 +1,115 @@
 #include <iostream>
-#include <iomanip>
-#include <chrono>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-
+#include <chrono>
+#include <iomanip>
 #include "modbus_frame.hpp"
-#include "physics_engine.hpp"
 #include "telemetry.hpp"
+#include "physics_engine.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
 
-#define MODBUS_PORT 5502
-#define TELEMETRY_PORT 5555
+inline uint16_t swap_endian16(uint16_t val) {
+    return (val << 8) | (val >> 8);
+}
 
 int main() {
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        std::cerr << "[ERROR] WSAStartup failed\n";
+        return 1;
+    }
+
     std::cout << "========================================================================\n";
     std::cout << "  VOLTGUARD :: PRODUCTION CYBER-PHYSICAL FIREWALL & TWIN DAEMON       \n";
     std::cout << "  Ingress: TCP 5502 (Modbus/TCP) | Egress: UDP 5555 (32-Byte Telemetry) \n";
     std::cout << "========================================================================\n";
 
-    // 1. Initialize Winsock
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "[FATAL] Failed to initialize Winsock.\n";
-        return 1;
-    }
-
-    // 2. Setup UDP Telemetry Socket
+    // 1. Setup UDP Telemetry Egress Socket (Port 5555)
     SOCKET udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     sockaddr_in udp_dest{};
     udp_dest.sin_family = AF_INET;
-    udp_dest.sin_port = htons(TELEMETRY_PORT);
+    udp_dest.sin_port = htons(5555);
     inet_pton(AF_INET, "127.0.0.1", &udp_dest.sin_addr);
 
-    // 3. Setup TCP Server Socket
-    SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    // 2. Setup Ingress TCP Server Socket (Port 5502)
+    SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(5502);
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(MODBUS_PORT);
 
-    int opt = 1;
-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
-
-    if (bind(listen_sock, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "[FATAL] Bind failed on port " << MODBUS_PORT << ".\n";
-        closesocket(listen_sock);
+    if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        std::cerr << "[ERROR] TCP Bind failed on 5502\n";
+        closesocket(server_fd);
         WSACleanup();
         return 1;
     }
 
-    listen(listen_sock, SOMAXCONN);
-    std::cout << "[LISTENING] Air-gapped enclave active on TCP port " << MODBUS_PORT << "...\n";
+    listen(server_fd, 5);
+    std::cout << "[LISTENING] Air-gapped enclave active on TCP port 5502...\n";
 
-    VoltGuard::PhysicsEngine engine(1800.0f);
-    auto last_time = std::chrono::steady_clock::now();
+    VoltGuard::PhysicsEngine engine;
+    auto start_epoch = std::chrono::steady_clock::now();
 
     while (true) {
-        SOCKET client_sock = accept(listen_sock, nullptr, nullptr);
+        SOCKET client_sock = accept(server_fd, nullptr, nullptr);
         if (client_sock == INVALID_SOCKET) continue;
 
-        uint8_t buffer[256];
-        int bytes_received = recv(client_sock, (char*)buffer, sizeof(buffer), 0);
+        char buffer[128];
+        int bytes_read = recv(client_sock, buffer, sizeof(buffer), 0);
 
-        if (bytes_received >= 12) {
-            const auto* modbus = reinterpret_cast<const VoltGuard::ModbusTCPHeader*>(buffer);
-            uint16_t tx_id = VoltGuard::byteswap16(modbus->transaction_id);
-            uint16_t rpm = VoltGuard::byteswap16(modbus->register_value);
+        if (bytes_read >= 12) {
+            auto* mb = reinterpret_cast<ModbusTcpHeader*>(buffer);
+            uint16_t tx_id = swap_endian16(mb->transaction_id);
+            uint16_t raw_rpm = swap_endian16(mb->register_value);
 
             auto now = std::chrono::steady_clock::now();
-            float dt = std::chrono::duration<float>(now - last_time).count();
-            last_time = now;
+            double cur_time = std::chrono::duration<double>(now - start_epoch).count();
 
-            float shock = 0.0f;
-            float twin_rpm = 1800.0f;
+            float shock_bar = 0.0f;
+            float twin_rpm = 0.0f;
+            VoltGuard::Verdict verdict = engine.evaluate(raw_rpm, cur_time, shock_bar, twin_rpm);
 
-            VoltGuard::Verdict verdict = engine.evaluate(rpm, dt, shock, twin_rpm);
+            // Construct 32-Byte Telemetry Frame
+            TelemetryFrame frame{};
+            frame.magic_header = 0x56475458; // "VGTX"
+            frame.transaction_id = tx_id;
+            frame.commanded_rpm = raw_rpm;
+            frame.joukowsky_shock_bar = shock_bar;
+            frame.twin_predicted_rpm = twin_rpm;
+            frame.verdict = (verdict == VoltGuard::Verdict::ALLOW) ? 0 : 1;
+            frame.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
 
-            const char* verdict_str = "[ALLOW: INVARIANT VALID]";
-            if (verdict == VoltGuard::Verdict::DROP_VIOLATION_INERTIA_ANOMALY) {
-                verdict_str = "[DROP: INERTIA ANOMALY TRIPWIRE]";
-            } else if (verdict != VoltGuard::Verdict::ALLOW) {
-                verdict_str = "[DROP: PHYSICAL BOUNDS BREACH]";
-            }
+            // Broadcast to UDP Visualizer
+            sendto(udp_sock, reinterpret_cast<const char*>(&frame), sizeof(frame), 0,
+                   reinterpret_cast<sockaddr*>(&udp_dest), sizeof(udp_dest));
 
+            // Terminal Journal Output
             std::cout << "[INGRESS] Tx: 0x" << std::hex << std::setw(4) << std::setfill('0') << tx_id << std::dec
-                      << " | RPM: " << std::setw(5) << std::setfill('0') << rpm
-                      << " | Shock: " << std::fixed << std::setprecision(2) << std::setw(5) << shock << " Bar"
-                      << " | Twin: " << std::setw(5) << std::setfill('0') << static_cast<uint16_t>(twin_rpm) << " RPM"
-                      << " -> " << verdict_str << "\n";
+                      << " | RPM: " << std::setw(5) << std::setfill('0') << raw_rpm
+                      << " | Shock: " << std::fixed << std::setprecision(2) << std::setw(5) << shock_bar << " Bar"
+                      << " | Twin: " << std::setw(5) << std::setfill('0') << static_cast<int>(twin_rpm) << " RPM -> ";
 
-            // Broadcast 32-Byte Telemetry Frame over UDP
-            VoltGuard::TelemetryFrame frame{};
-            frame.magic = 0x5647544D; // "VGTM"
-            frame.tx_id = tx_id;
-            frame.commanded_rpm = rpm;
-            frame.pressure_shock_bar = shock;
-            frame.twin_estimated_rpm = twin_rpm;
-            frame.verdict = static_cast<uint8_t>(verdict);
-            frame.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
-
-            sendto(udp_sock, (const char*)&frame, sizeof(frame), 0, (sockaddr*)&udp_dest, sizeof(udp_dest));
+            if (verdict == VoltGuard::Verdict::ALLOW) {
+                std::cout << "[ALLOW: INVARIANT VALID]\n";
+                send(client_sock, buffer, bytes_read, 0); // Echo packet forward
+            } else {
+                std::cout << "[DROP: ";
+                if (verdict == VoltGuard::Verdict::DROP_VIOLATION_INERTIA_SLIP) {
+                    std::cout << "INERTIA ANOMALY TRIPWIRE]\n";
+                } else {
+                    std::cout << "PHYSICAL BOUNDS BREACH]\n";
+                }
+                uint8_t err_resp[9] = { buffer[0], buffer[1], 0x00, 0x00, 0x00, 0x03, buffer[6], 0x86, 0x04 };
+                send(client_sock, reinterpret_cast<const char*>(err_resp), sizeof(err_resp), 0);
+            }
         }
-
         closesocket(client_sock);
     }
 
-    closesocket(listen_sock);
+    closesocket(server_fd);
     closesocket(udp_sock);
     WSACleanup();
     return 0;

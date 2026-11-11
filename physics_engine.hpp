@@ -1,73 +1,82 @@
 #pragma once
 #include <cstdint>
 #include <cmath>
+#include <iostream>
 #include "digital_twin.hpp"
 
 namespace VoltGuard {
 
-    enum class Verdict : uint8_t {
-        ALLOW = 1,
-        DROP_VIOLATION_RPM_MAX = 0,
-        DROP_VIOLATION_SURGE_RATE = 2,
-        DROP_INVALID_RANGE = 3,
-        DROP_VIOLATION_INERTIA_ANOMALY = 4
-    };
+enum class Verdict : uint8_t {
+    ALLOW = 0,
+    DROP_VIOLATION_RPM_MAX = 1,
+    DROP_VIOLATION_CAVITATION = 2,
+    DROP_VIOLATION_PRESSURE_BURST = 3,
+    DROP_VIOLATION_INERTIA_SLIP = 4
+};
 
-    struct PhysicsLimits {
-        static constexpr uint16_t MAX_SAFE_RPM = 3600;       // Rotor mechanical shear ceiling
-        static constexpr uint16_t MIN_OPERATIONAL_RPM = 500;  // Impeller cavitation collapse floor
-        static constexpr float    MAX_SHOCK_BAR = 16.0f;      // Pipe structural rupture ceiling (16 Bar)
+struct PhysicsEngine {
+    // Physical Plant Thresholds
+    static constexpr double MAX_SAFE_RPM = 3600.0;
+    static constexpr double MIN_CAVITATION_RPM = 500.0;
+    static constexpr double MAX_PIPE_PRESSURE_BAR = 16.0;
+    static constexpr double NOMINAL_BASELINE_BAR = 7.75;
+    static constexpr double MAX_ALLOWABLE_SLIP_RPM = 500.0;
+
+    // Fluid Dynamics Constants (Water at 20°C in Schedule 40 Steel)
+    static constexpr double FLUID_DENSITY_RHO = 998.2; // kg/m^3
+    static constexpr double WAVE_SPEED_C = 1200.0;     // m/s acoustic velocity
+    static constexpr double VELOCITY_COEFFICIENT = 0.0024; // RPM to m/s conversion
+
+    DigitalTwin twin;
+    double last_time_sec = 0.0;
+
+    PhysicsEngine() : twin(1800.0) {}
+
+    // Joukowsky Water Hammer Surge Equation: Delta P = rho * c * Delta v
+    static double calculate_joukowsky_shock(double commanded_rpm) {
+        double delta_v = std::abs(commanded_rpm - 1800.0) * VELOCITY_COEFFICIENT;
+        double delta_p_pascals = FLUID_DENSITY_RHO * WAVE_SPEED_C * delta_v;
+        double delta_p_bar = delta_p_pascals / 100000.0;
+        return NOMINAL_BASELINE_BAR + delta_p_bar;
+    }
+
+    // Comprehensive Cyber-Physical Invariant Evaluation
+    Verdict evaluate(uint16_t raw_rpm, double current_time_sec, float& out_shock, float& out_twin_rpm) {
+        double commanded_rpm = static_cast<double>(raw_rpm);
         
-        static constexpr float FLUID_DENSITY = 998.2f;        // Water density kg/m^3
-        static constexpr float SPEED_OF_SOUND = 1480.0f;      // Acoustic speed m/s
-        static constexpr float RPM_TO_VELOCITY = 0.0002916f;  // 1800 RPM = 7.75 Bar baseline
-    };
+        // 1. Compute Joukowsky Fluid Surge Pressure
+        out_shock = static_cast<float>(calculate_joukowsky_shock(commanded_rpm));
 
-    class PhysicsEngine {
-    private:
-        DigitalTwin twin_;
+        // 2. Step RK4 Digital Twin Dynamics
+        double dt = (last_time_sec == 0.0) ? 0.02 : (current_time_sec - last_time_sec);
+        last_time_sec = current_time_sec;
+        double twin_rpm = twin.step_rk4(commanded_rpm, dt);
+        out_twin_rpm = static_cast<float>(twin_rpm);
 
-    public:
-        PhysicsEngine(float baseline_rpm = 1800.0f) : twin_(baseline_rpm) {}
-
-        static float calculate_joukowsky_shock(float rpm) {
-            float delta_v = rpm * PhysicsLimits::RPM_TO_VELOCITY;
-            float delta_p_pascals = PhysicsLimits::FLUID_DENSITY * PhysicsLimits::SPEED_OF_SOUND * delta_v;
-            return delta_p_pascals / 100000.0f; // Converted to Bar
+        // 3. Multi-Invariant Tripwire Verification
+        // Invariant A: Mechanical Rotor Shear Limit
+        if (commanded_rpm > MAX_SAFE_RPM) {
+            return Verdict::DROP_VIOLATION_RPM_MAX;
         }
 
-        // Overload 1: For parser.cpp
-        Verdict evaluate(uint16_t commanded_rpm, float& out_shock_bar) {
-            out_shock_bar = calculate_joukowsky_shock(static_cast<float>(commanded_rpm));
-
-            if (commanded_rpm < PhysicsLimits::MIN_OPERATIONAL_RPM) {
-                return Verdict::DROP_INVALID_RANGE;
-            }
-            if (commanded_rpm > PhysicsLimits::MAX_SAFE_RPM) {
-                return Verdict::DROP_VIOLATION_RPM_MAX;
-            }
-            if (out_shock_bar > PhysicsLimits::MAX_SHOCK_BAR) {
-                return Verdict::DROP_VIOLATION_SURGE_RATE;
-            }
-            if (twin_.is_inertial_violation(static_cast<float>(commanded_rpm), 0.05f)) {
-                return Verdict::DROP_VIOLATION_INERTIA_ANOMALY;
-            }
-
-            twin_.step_rk4(static_cast<float>(commanded_rpm), 0.05f);
-            return Verdict::ALLOW;
+        // Invariant B: Cavitation Vacuum Stall Limit
+        if (commanded_rpm < MIN_CAVITATION_RPM) {
+            return Verdict::DROP_VIOLATION_CAVITATION;
         }
 
-        // Overload 2: For server.cpp (with twin telemetry tracking)
-        Verdict evaluate(uint16_t commanded_rpm, float dt_seconds, float& out_shock_bar, float& out_estimated_rpm) {
-            Verdict v = evaluate(commanded_rpm, out_shock_bar);
-            out_estimated_rpm = twin_.get_estimated_rpm();
-            return v;
+        // Invariant C: Hydrodynamic Pipe Rupture Limit
+        if (out_shock > MAX_PIPE_PRESSURE_BAR) {
+            return Verdict::DROP_VIOLATION_PRESSURE_BURST;
         }
 
-        Verdict evaluate_with_twin(uint16_t commanded_rpm, float dt_seconds, float& out_shock_bar, float& out_estimated_rpm) {
-            return evaluate(commanded_rpm, dt_seconds, out_shock_bar, out_estimated_rpm);
+        // Invariant D: Inertia Anomaly / Dynamic Slip Limit
+        double slip = std::abs(commanded_rpm - twin_rpm);
+        if (slip > MAX_ALLOWABLE_SLIP_RPM) {
+            return Verdict::DROP_VIOLATION_INERTIA_SLIP;
         }
 
-        DigitalTwin& get_twin() { return twin_; }
-    };
-}
+        return Verdict::ALLOW;
+    }
+};
+
+} // namespace VoltGuard
