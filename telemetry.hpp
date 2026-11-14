@@ -1,17 +1,20 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 
 #pragma pack(push, 1)
 
+// Standard 32-Byte Aligned Real-Time Telemetry Frame for Wire Stream (Port 5555 UDP)
 struct TelemetryFrame {
-    uint32_t magic_header;       // 0x56475458 ("VGTX" in ASCII) -> 4 Bytes
-    uint16_t transaction_id;     // Modbus Transaction ID        -> 2 Bytes
-    uint16_t commanded_rpm;      // Wire Ingress RPM             -> 2 Bytes
-    float    joukowsky_shock_bar;// Computed Fluid Shock         -> 4 Bytes
-    float    twin_predicted_rpm; // RK4 Digital Twin RPM         -> 4 Bytes
-    uint8_t  verdict;            // 0=ALLOW, 1=DROP              -> 1 Byte
-    uint8_t  reserved[7];        // Exact struct alignment pad   -> 7 Bytes
-    uint64_t timestamp_us;       // Microsecond timestamp        -> 8 Bytes
+    uint32_t magic;              // 0x56475544 ("VGUD")
+    uint16_t transaction_id;     // Modbus Transaction ID
+    uint16_t commanded_rpm;      // Ingress requested RPM
+    float joukowsky_shock_bar;   // Calculated hydro-mechanical dynamic shock (Bar)
+    float digital_twin_rpm;      // RK4 Dynamic Twin Predicted RPM
+    float cumulative_fatigue;    // Week 4: Stateful Cumulative Stress Score
+    uint8_t verdict;             // 0x00=ALLOW, 0x01..0x06=DROP Reason
+    uint8_t reserved[3];         // 4-byte struct alignment padding
+    uint64_t timestamp_us;       // Microsecond timestamp
 };
 
 #pragma pack(pop)
