@@ -4,17 +4,16 @@
 
 #pragma pack(push, 1)
 
-// Standard 32-Byte Aligned Real-Time Telemetry Frame for Wire Stream (Port 5555 UDP)
+// Exactly 32-Byte Memory Aligned Binary Telemetry Frame for UDP 5555 Stream
 struct TelemetryFrame {
-    uint32_t magic;              // 0x56475544 ("VGUD")
-    uint16_t transaction_id;     // Modbus Transaction ID
-    uint16_t commanded_rpm;      // Ingress requested RPM
-    float joukowsky_shock_bar;   // Calculated hydro-mechanical dynamic shock (Bar)
-    float digital_twin_rpm;      // RK4 Dynamic Twin Predicted RPM
-    float cumulative_fatigue;    // Week 4: Stateful Cumulative Stress Score
-    uint8_t verdict;             // 0x00=ALLOW, 0x01..0x06=DROP Reason
-    uint8_t reserved[3];         // 4-byte struct alignment padding
-    uint64_t timestamp_us;       // Microsecond timestamp
+    uint32_t timestamp_us;      // 4 Bytes: Microsecond wire timestamp
+    uint16_t transaction_id;    // 2 Bytes: Modbus Tx ID
+    uint16_t commanded_rpm;     // 2 Bytes: Commanded shaft velocity
+    float    pressure_shock;    // 4 Bytes: Joukowsky fluid surge pressure (Bar)
+    uint16_t twin_rpm;          // 2 Bytes: RK4 Digital Twin dynamic state
+    float    fatigue_score;     // 4 Bytes: Cumulative mechanical fatigue (0-100)
+    uint8_t  verdict;           // 1 Byte : 0=ALLOW, 1=DROP_MAX_RPM, 2=DROP_SHOCK, 3=DROP_FATIGUE, 4=DROP_CAVITATION
+    uint8_t  reserved[13];      // 13 Bytes: Strict alignment padding to reach 32 bytes
 };
 
 #pragma pack(pop)

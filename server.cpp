@@ -1,81 +1,55 @@
 #include <iostream>
 #include <iomanip>
 #include <chrono>
-#include <string>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-
 #include "modbus_frame.hpp"
-#include "physics_engine.hpp"
 #include "telemetry.hpp"
+#include "physics_engine.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
 
-constexpr int MODBUS_PORT = 5502;
-constexpr int TELEMETRY_PORT = 5555;
-constexpr const char* TELEMETRY_IP = "127.0.0.1";
-
-const char* verdict_to_string(VoltGuard::Verdict v) {
-    switch (v) {
-        case VoltGuard::Verdict::ALLOW:
-            return "[ ALLOW: INVARIANT VALID ]";
-        case VoltGuard::Verdict::DROP_VIOLATION_RPM_MAX:
-            return "[ DROP: MECHANICAL ROTOR CEILING BREACH ]";
-        case VoltGuard::Verdict::DROP_VIOLATION_CAVITATION:
-            return "[ DROP: CAVITATION VACUUM FLOOR BREACH ]";
-        case VoltGuard::Verdict::DROP_VIOLATION_JOUKOWSKY_SHOCK:
-            return "[ DROP: JOUKOWSKY PIPE BURST SURGE ]";
-        case VoltGuard::Verdict::DROP_VIOLATION_INERTIA_SLIP:
-            return "[ DROP: ROTOR INERTIA STEP JUMP SLIP ]";
-        case VoltGuard::Verdict::DROP_CUMULATIVE_FATIGUE:
-            return "[ DROP: CUMULATIVE MECHANICAL FATIGUE BREACH ]";
-        case VoltGuard::Verdict::DROP_SUSTAINED_OVERLOAD:
-            return "[ DROP: SUSTAINED HIGH-STRESS OVERLOAD ]";
-        default:
-            return "[ DROP: UNKNOWN INVARIANT VIOLATION ]";
-    }
+static inline uint16_t byteswap16(uint16_t val) {
+    return (val << 8) | (val >> 8);
 }
 
 int main() {
     std::cout << "========================================================================\n";
-    std::cout << "  VOLTGUARD :: PRODUCTION CYBER-PHYSICAL OT FIREWALL DAEMON (WEEK 4)\n";
-    std::cout << "  L2 Zero-Copy Ingress | State-Space Fatigue & RK4 Multi-Invariant IPS\n";
-    std::cout << "========================================================================\n";
+    std::cout << "  VOLTGUARD :: PRODUCTION CYBER-PHYSICAL OT FIREWALL & IPS (WEEK 1-4)    \n";
+    std::cout << "  INGRESS: TCP 5502 (ZERO-COPY) | TELEMETRY: UDP 5555 (32-BYTE ALIGNED)  \n";
+    std::cout << "========================================================================\n\n";
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        std::cerr << "[-] WSAStartup failed\n";
+        std::cerr << "[FATAL] WSAStartup failed.\n";
         return 1;
     }
 
-    // 1. Setup UDP Telemetry Socket
-    SOCKET udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    sockaddr_in udp_dest{};
-    udp_dest.sin_family = AF_INET;
-    udp_dest.sin_port = htons(TELEMETRY_PORT);
-    inet_pton(AF_INET, TELEMETRY_IP, &udp_dest.sin_addr);
-
-    // 2. Setup Modbus TCP Server Socket (Port 5502)
-    SOCKET server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    // 1. Modbus/TCP Ingress Listener (TCP 5502)
+    SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(MODBUS_PORT);
+    server_addr.sin_port = htons(5502);
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
     if (bind(server_fd, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "[-] TCP Bind failed on port " << MODBUS_PORT << "\n";
-        closesocket(server_fd);
-        WSACleanup();
+        std::cerr << "[FATAL] Bind failed on TCP 5502.\n";
         return 1;
     }
-
     listen(server_fd, 5);
-    std::cout << "[+] OT Firewall listening on 0.0.0.0:" << MODBUS_PORT << " (Modbus/TCP)\n";
-    std::cout << "[+] Live Telemetry Stream broadcast: " << TELEMETRY_IP << ":" << TELEMETRY_PORT << " (UDP)\n";
-    std::cout << "------------------------------------------------------------------------\n";
+
+    // 2. UDP Telemetry Socket for Native Qt Dashboard (UDP 5555)
+    SOCKET udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in udp_dest{};
+    udp_dest.sin_family = AF_INET;
+    udp_dest.sin_port = htons(5555);
+    inet_pton(AF_INET, "127.0.0.1", &udp_dest.sin_addr);
 
     VoltGuard::PhysicsEngine engine;
-    auto start_time = std::chrono::steady_clock::now();
+    std::cout << "[INFO] VoltGuard Zero-Copy IPS Ingress Armed & Listening on TCP 5502...\n\n";
 
     while (true) {
         sockaddr_in client_addr{};
@@ -83,52 +57,63 @@ int main() {
         SOCKET client_sock = accept(server_fd, (sockaddr*)&client_addr, &client_len);
         if (client_sock == INVALID_SOCKET) continue;
 
-        uint8_t buffer[64];
-        int bytes_read = recv(client_sock, (char*)buffer, sizeof(buffer), 0);
+        char buffer[256];
+        int bytes_read = recv(client_sock, buffer, sizeof(buffer), 0);
 
-        if (bytes_read >= 12) {
-            auto auto_now = std::chrono::steady_clock::now();
-            double current_time_sec = std::chrono::duration<double>(auto_now - start_time).count();
-            uint64_t timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(auto_now.time_since_epoch()).count();
+        if (bytes_read >= (int)sizeof(ModbusTcpHeader)) {
+            auto start_time = std::chrono::high_resolution_clock::now();
 
-            // Zero-copy parse header & payload
-            uint16_t tx_id = (buffer[0] << 8) | buffer[1];
-            uint16_t commanded_rpm = (buffer[10] << 8) | buffer[11];
+            // Zero-copy direct pointer cast
+            const auto* hdr = reinterpret_cast<const ModbusTcpHeader*>(buffer);
+            uint16_t tx_id   = byteswap16(hdr->transaction_id);
+            uint16_t proto   = byteswap16(hdr->protocol_id);
+            uint16_t length  = byteswap16(hdr->length);
+            uint16_t reg_addr= byteswap16(hdr->register_address);
+            uint16_t raw_val = byteswap16(hdr->register_value);
 
-            // Evaluate through Multi-Invariant Physics Engine
-            double shock_bar = 0.0;
-            double twin_rpm = 0.0;
-            VoltGuard::Verdict verdict = engine.evaluate(commanded_rpm, current_time_sec, shock_bar, twin_rpm);
-            double fatigue = engine.get_current_fatigue();
+            float shock_bar = 0.0f;
+            uint16_t twin_rpm = 0;
+            float fatigue_score = 0.0f;
 
-            // Emit 32-Byte Telemetry Frame to UDP visualizer
+            // Physics Invariant Boundary Verification
+            VoltGuard::Verdict v = engine.evaluate(raw_val, shock_bar, twin_rpm, fatigue_score);
+
+            auto end_time = std::chrono::high_resolution_clock::now();
+            double latency_us = std::chrono::duration<double, std::micro>(end_time - start_time).count();
+
+            // Construct 32-Byte Wire Telemetry Frame
             TelemetryFrame frame{};
-            frame.magic = 0x56475544; // "VGUD"
+            frame.timestamp_us   = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(end_time.time_since_epoch()).count();
             frame.transaction_id = tx_id;
-            frame.commanded_rpm = commanded_rpm;
-            frame.joukowsky_shock_bar = static_cast<float>(shock_bar);
-            frame.digital_twin_rpm = static_cast<float>(twin_rpm);
-            frame.cumulative_fatigue = static_cast<float>(fatigue);
-            frame.verdict = static_cast<uint8_t>(verdict);
-            frame.timestamp_us = timestamp_us;
+            frame.commanded_rpm  = raw_val;
+            frame.pressure_shock = shock_bar;
+            frame.twin_rpm       = twin_rpm;
+            frame.fatigue_score  = fatigue_score;
+            frame.verdict        = static_cast<uint8_t>(v);
 
+            // Stream Frame to Qt Dashboard
             sendto(udp_sock, (const char*)&frame, sizeof(frame), 0, (sockaddr*)&udp_dest, sizeof(udp_dest));
 
-            // Terminal Audit Log
             std::cout << "[INGRESS] Tx: 0x" << std::hex << std::setw(4) << std::setfill('0') << tx_id << std::dec
-                      << " | RPM: " << std::setw(5) << commanded_rpm
+                      << " | Reg: 0x" << std::hex << std::setw(4) << reg_addr << std::dec
+                      << " | Commanded: " << std::setw(5) << raw_val << " RPM"
                       << " | Shock: " << std::fixed << std::setprecision(2) << shock_bar << " Bar"
-                      << " | Twin: " << std::setw(5) << static_cast<int>(twin_rpm) << " RPM"
-                      << " | Fatigue: " << std::fixed << std::setprecision(1) << fatigue
-                      << " -> " << verdict_to_string(verdict) << "\n";
+                      << " | Twin: " << std::setw(5) << twin_rpm << " RPM"
+                      << " | Latency: " << std::fixed << std::setprecision(2) << latency_us << " us -> ";
 
-            // Wire IPS Verdict Response
-            if (verdict == VoltGuard::Verdict::ALLOW) {
-                send(client_sock, (const char*)buffer, bytes_read, 0); // Echo valid packet
+            if (v == VoltGuard::Verdict::ALLOW) {
+                std::cout << "\033[1;32m[ ALLOW : INVARIANT MET ]\033[0m\n";
+                // True IPS Forwarding: Forward packet downstream
+                send(client_sock, buffer, bytes_read, 0);
             } else {
-                // Modbus Exception Response 0x86 (Server Device Failure / Invariant Drop)
+                std::cout << "\033[1;31m[ DROP : INTERCEPTED AT WIRE ]\033[0m (Verdict Code: " << (int)v << ")\n";
+                // Inline Dropping: Discard packet and return Modbus Exception 0x86 (Zero narrowing warnings)
                 uint8_t err_resp[9] = {
-                    buffer[0], buffer[1], 0x00, 0x00, 0x00, 0x03, buffer[6], 0x86, 0x04
+                    static_cast<uint8_t>(buffer[0]),
+                    static_cast<uint8_t>(buffer[1]),
+                    0x00, 0x00, 0x00, 0x03,
+                    static_cast<uint8_t>(buffer[6]),
+                    0x86, 0x04
                 };
                 send(client_sock, (const char*)err_resp, sizeof(err_resp), 0);
             }

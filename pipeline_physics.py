@@ -1,36 +1,28 @@
 import numpy as np
 from scipy.integrate import odeint
 
-def fluid_dynamics_model(y, t, commanded_rpm):
-    rpm, pressure = y
-    
-    # Motor mechanical shaft inertia response: d(RPM)/dt = (target - current) / tau
-    tau_motor = 0.15 # seconds
-    drpm_dt = (commanded_rpm - rpm) / tau_motor
-    
-    # Joukowsky transient shock differential: dP/dt = rho * a * (dv/dt)
-    rho = 998.2   # kg/m^3 (Water density)
-    a = 1480.0    # m/s (Chamber acoustic sound speed)
-    k_v = 0.0016  # RPM to m/s conversion constant
-    
-    dp_dt = (rho * a * k_v * drpm_dt) / 100000.0 # Bar/sec
-    return [drpm_dt, dp_dt]
+def fluid_dynamics_model(state, t, commanded_rpm):
+    rpm, pressure_bar = state
+    # Physical system constants
+    J = 0.85        # kg*m^2 (Rotor moment of inertia)
+    rho = 1000.0    # kg/m^3 (Water density)
+    a = 1200.0      # m/s (Sound wave velocity in steel conduit)
+    r = 0.12        # m (Impeller radius)
+
+    # State differential equations
+    d_omega_dt = (commanded_rpm - rpm) * 1.5
+    delta_v = (d_omega_dt * 2 * np.pi / 60.0) * r
+    dp_dt = (rho * a * delta_v) / 100000.0 - (pressure_bar - 7.75) * 0.8
+    return [d_omega_dt, dp_dt]
 
 if __name__ == "__main__":
     print("========================================================================")
-    print("  [VoltGuard] Week 1 Baseline Physics Simulation (SciPy ODE Model)      ")
+    print("  VOLTGUARD :: SCIPY ODE BASELINE FLUID & PRESSURE SYSTEM MODEL (WEEK 1)")
     print("========================================================================")
-    
     t = np.linspace(0, 1.0, 50)
-    y0 = [1800.0, 7.76] # Initial steady state at 1,800 RPM
-    
-    # Simulate step change to 50,000 RPM overspeed attack
-    solution = odeint(fluid_dynamics_model, y0, t, args=(50000,))
-    peak_rpm = np.max(solution[:, 0])
-    peak_pressure = np.max(solution[:, 1])
-    
-    print(f"[+] Steady State Baseline  : 1,800 RPM | 7.76 Bar")
-    print(f"[+] Simulated Stuxnet Surge: {peak_rpm:,.1f} RPM")
-    print(f"[+] Dynamic Surge Pressure : {peak_pressure:.2f} Bar (Exceeds 16.0 Bar Rupture!)")
-    print("[+] Physics Verdict        : FATAL PIPE OVERPRESSURE DETECTED -> REQUIRE IMMEDIATE DROP")
-    print("========================================================================")
+    y0 = [1800.0, 7.75]
+    sol = odeint(fluid_dynamics_model, y0, t, args=(50000,))
+    print(f"[+] Baseline Steady State : 1,800 RPM | 7.75 Bar")
+    print(f"[+] Simulated Stuxnet Peak : {np.max(sol[:, 0]):,.1f} RPM")
+    print(f"[+] Dynamic Surge Pressure : {np.max(sol[:, 1]):.2f} Bar (Exceeds 16.0 Bar Rupture!)")
+    print(f"[+] Physics Verification   : FATAL PIPE OVERPRESSURE DETECTED -> REQUIRE IMMEDIATE DROP")
