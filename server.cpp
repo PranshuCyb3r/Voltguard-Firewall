@@ -4,44 +4,33 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "modbus_frame.hpp"
-#include "telemetry.hpp"
 #include "physics_engine.hpp"
+#include "telemetry.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
 
-static inline uint16_t byteswap16(uint16_t val) {
-    return (val << 8) | (val >> 8);
-}
-
 int main() {
-    std::cout << "========================================================================\n";
-    std::cout << "  VOLTGUARD :: PRODUCTION CYBER-PHYSICAL OT FIREWALL & IPS (WEEK 1-4)    \n";
-    std::cout << "  INGRESS: TCP 5502 (ZERO-COPY) | TELEMETRY: UDP 5555 (32-BYTE ALIGNED)  \n";
-    std::cout << "========================================================================\n\n";
-
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        std::cerr << "[FATAL] WSAStartup failed.\n";
+        std::cerr << "[FATAL] WSAStartup failed\n";
         return 1;
     }
 
-    // 1. Modbus/TCP Ingress Listener (TCP 5502)
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in server_addr{};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(5502);
+    sockaddr_in srv_addr{};
+    srv_addr.sin_family = AF_INET;
+    srv_addr.sin_addr.s_addr = INADDR_ANY;
+    srv_addr.sin_port = htons(5502);
 
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
-    if (bind(server_fd, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        std::cerr << "[FATAL] Bind failed on TCP 5502.\n";
+    if (bind(server_fd, (sockaddr*)&srv_addr, sizeof(srv_addr)) == SOCKET_ERROR) {
+        std::cerr << "[FATAL] Bind failed on port 5502\n";
         return 1;
     }
     listen(server_fd, 5);
 
-    // 2. UDP Telemetry Socket for Native Qt Dashboard (UDP 5555)
     SOCKET udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
     sockaddr_in udp_dest{};
     udp_dest.sin_family = AF_INET;
@@ -49,75 +38,68 @@ int main() {
     inet_pton(AF_INET, "127.0.0.1", &udp_dest.sin_addr);
 
     VoltGuard::PhysicsEngine engine;
-    std::cout << "[INFO] VoltGuard Zero-Copy IPS Ingress Armed & Listening on TCP 5502...\n\n";
+
+    std::cout << "========================================================================\n";
+    std::cout << "  VOLTGUARD :: PRODUCTION CYBER-PHYSICAL OT FIREWALL & IPS (WEEK 1-4)    \n";
+    std::cout << "  INGRESS: TCP 5502 (ZERO-COPY) | TELEMETRY: UDP 5555 (32-BYTE ALIGNED)  \n";
+    std::cout << "========================================================================\n";
+    std::cout << "[INFO] VoltGuard Zero-Copy IPS Ingress Armed & Listening on TCP 5502...\n";
 
     while (true) {
         sockaddr_in client_addr{};
-        int client_len = sizeof(client_addr);
-        SOCKET client_sock = accept(server_fd, (sockaddr*)&client_addr, &client_len);
+        int addr_len = sizeof(client_addr);
+        SOCKET client_sock = accept(server_fd, (sockaddr*)&client_addr, &addr_len);
         if (client_sock == INVALID_SOCKET) continue;
 
-        char buffer[256];
-        int bytes_read = recv(client_sock, buffer, sizeof(buffer), 0);
+        auto t_start = std::chrono::high_resolution_clock::now();
 
-        if (bytes_read >= (int)sizeof(ModbusTcpHeader)) {
-            auto start_time = std::chrono::high_resolution_clock::now();
+        uint8_t buffer[256];
+        int bytes_read = recv(client_sock, (char*)buffer, sizeof(buffer), 0);
 
-            // Zero-copy direct pointer cast
-            const auto* hdr = reinterpret_cast<const ModbusTcpHeader*>(buffer);
-            uint16_t tx_id   = byteswap16(hdr->transaction_id);
-            uint16_t proto   = byteswap16(hdr->protocol_id);
-            uint16_t length  = byteswap16(hdr->length);
-            uint16_t reg_addr= byteswap16(hdr->register_address);
-            uint16_t raw_val = byteswap16(hdr->register_value);
+        if (bytes_read >= 12) {
+            uint16_t tx_id = (buffer[0] << 8) | buffer[1];
+            uint8_t func   = buffer[7];
+            uint16_t reg   = (buffer[8] << 8) | buffer[9];
+            uint16_t raw_val = (buffer[10] << 8) | buffer[11];
 
-            float shock_bar = 0.0f;
-            uint16_t twin_rpm = 0;
-            float fatigue_score = 0.0f;
+            float shock_bar = 7.75f;
+            uint16_t twin_rpm = 1800;
+            float fatigue_score = 12.4f;
 
-            // Physics Invariant Boundary Verification
             VoltGuard::Verdict v = engine.evaluate(raw_val, shock_bar, twin_rpm, fatigue_score);
 
-            auto end_time = std::chrono::high_resolution_clock::now();
-            double latency_us = std::chrono::duration<double, std::micro>(end_time - start_time).count();
-
-            // Construct 32-Byte Wire Telemetry Frame
-            TelemetryFrame frame{};
-            frame.timestamp_us   = (uint32_t)std::chrono::duration_cast<std::chrono::microseconds>(end_time.time_since_epoch()).count();
-            frame.transaction_id = tx_id;
-            frame.commanded_rpm  = raw_val;
-            frame.pressure_shock = shock_bar;
-            frame.twin_rpm       = twin_rpm;
-            frame.fatigue_score  = fatigue_score;
-            frame.verdict        = static_cast<uint8_t>(v);
-
-            // Stream Frame to Qt Dashboard
-            sendto(udp_sock, (const char*)&frame, sizeof(frame), 0, (sockaddr*)&udp_dest, sizeof(udp_dest));
+            auto t_end = std::chrono::high_resolution_clock::now();
+            double latency_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
 
             std::cout << "[INGRESS] Tx: 0x" << std::hex << std::setw(4) << std::setfill('0') << tx_id << std::dec
-                      << " | Reg: 0x" << std::hex << std::setw(4) << reg_addr << std::dec
-                      << " | Commanded: " << std::setw(5) << raw_val << " RPM"
+                      << " | Reg: 0x" << std::hex << std::setw(4) << std::setfill('0') << reg << std::dec
+                      << " | Commanded: " << std::setw(5) << std::setfill('0') << raw_val << " RPM"
                       << " | Shock: " << std::fixed << std::setprecision(2) << shock_bar << " Bar"
-                      << " | Twin: " << std::setw(5) << twin_rpm << " RPM"
+                      << " | Twin: " << std::setw(5) << std::setfill('0') << twin_rpm << " RPM"
                       << " | Latency: " << std::fixed << std::setprecision(2) << latency_us << " us -> ";
 
             if (v == VoltGuard::Verdict::ALLOW) {
-                std::cout << "\033[1;32m[ ALLOW : INVARIANT MET ]\033[0m\n";
-                // True IPS Forwarding: Forward packet downstream
-                send(client_sock, buffer, bytes_read, 0);
+                std::cout << "[ ALLOW : INVARIANT MET ]\n";
+                send(client_sock, (const char*)buffer, bytes_read, 0);
             } else {
-                std::cout << "\033[1;31m[ DROP : INTERCEPTED AT WIRE ]\033[0m (Verdict Code: " << (int)v << ")\n";
-                // Inline Dropping: Discard packet and return Modbus Exception 0x86 (Zero narrowing warnings)
-                uint8_t err_resp[9] = {
-                    static_cast<uint8_t>(buffer[0]),
-                    static_cast<uint8_t>(buffer[1]),
-                    0x00, 0x00, 0x00, 0x03,
-                    static_cast<uint8_t>(buffer[6]),
-                    0x86, 0x04
-                };
+                std::cout << "[ DROP : INTERCEPTED AT WIRE ] (Verdict Code: " << static_cast<int>(v) << ")\n";
+                uint8_t err_resp[9] = { buffer[0], buffer[1], 0x00, 0x00, 0x00, 0x03, buffer[6], 0x86, 0x04 };
                 send(client_sock, (const char*)err_resp, sizeof(err_resp), 0);
             }
+
+            TelemetryFrame frame{};
+            frame.timestamp_us = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+            frame.tx_id = tx_id;
+            frame.commanded_rpm = raw_val;
+            frame.joukowsky_shock = shock_bar;
+            frame.twin_rpm = twin_rpm;
+            frame.basquin_fatigue = fatigue_score;
+            frame.verdict = static_cast<uint8_t>(v);
+
+            sendto(udp_sock, (const char*)&frame, sizeof(frame), 0, (sockaddr*)&udp_dest, sizeof(udp_dest));
         }
+
         closesocket(client_sock);
     }
 
